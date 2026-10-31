@@ -85,9 +85,12 @@ function renderStatus(deps) {
   const personaMode = personaSnap.mode === "external" ? "external" : "self";
   const personaKind = ["none", "file", "http"].indexOf(personaSnap.kind) >= 0 ? personaSnap.kind : "none";
   const personaHash = typeof personaSnap.hash === "string" ? personaSnap.hash : "";
+  // 触发来源：turn 是「这轮聊到才同步」，其余（含空/startup）一律按启动触发显示
+  const personaTrigger = personaSnap.lastTrigger === "turn" ? "由 turn 触发" : "由启动触发";
   lines.push(
     "人格：模式 " + personaMode + " · 来源 " + personaKind + " · 上次同步 " +
       (Number.isFinite(personaSnap.lastSyncAt) ? new Date(personaSnap.lastSyncAt).toISOString().slice(0, 19).replace("T", " ") + "Z" : "未同步") +
+      " · " + personaTrigger +
       (personaHash ? "（hash " + personaHash.slice(0, 4) + "…）" : "")
   );
   const notes = Array.isArray(deps.notes) ? deps.notes : [];
