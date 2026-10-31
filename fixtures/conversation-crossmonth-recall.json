@@ -1,0 +1,167 @@
+{
+  "$schema": "dsh-mnemos/fixture-conversation@1",
+  "fixture": "conversation-crossmonth-recall",
+  "synthetic": true,
+  "notice": "全部内容为虚构，不含任何真实用户数据。专测「一月说过、四月要想起」的跨月线索。",
+  "scenario": "跨月线索回忆",
+  "now": "2025-04-06T10:00:00+08:00",
+  "note": "meta.time 用 ISO 月份串（2025-04），metadata 的 parseInterval 会展开成整月区间；靠 meta 而不是正文把一月的记录捞回来。",
+  "turns": [
+    {
+      "at": "2025-01-18T22:30:00+08:00",
+      "role": "user",
+      "text": "我在计划四月去杭州看樱花。"
+    },
+    {
+      "at": "2025-01-18T22:33:00+08:00",
+      "role": "user",
+      "text": "想住西湖边的民宿，早上能走去湖边。"
+    },
+    {
+      "at": "2025-04-05T19:40:00+08:00",
+      "role": "user",
+      "text": "四月的杭州行程已经订好了。"
+    },
+    {
+      "at": "2025-04-05T19:52:00+08:00",
+      "role": "user",
+      "text": "可惜没看到满开的樱花，有点遗憾。"
+    }
+  ],
+  "records": [
+    {
+      "id": "turn-trip-01",
+      "kind": "event",
+      "tier": "hot",
+      "subject": "user",
+      "text": "用户计划四月去杭州看樱花。",
+      "createdAt": "2025-01-18T22:30:00+08:00",
+      "meta": {
+        "time": "2025-04",
+        "place": "杭州",
+        "topic": [
+          "旅行",
+          "樱花"
+        ]
+      },
+      "emotion": {
+        "valence": 0.45,
+        "arousal": 0.5,
+        "cues": [
+          "计划"
+        ]
+      },
+      "weight": 0.6,
+      "mentions": 2,
+      "sourceRefs": [
+        "turn-1"
+      ]
+    },
+    {
+      "id": "turn-trip-02",
+      "kind": "fact",
+      "tier": "hot",
+      "subject": "user",
+      "text": "用户想住西湖边的民宿，早上走去湖边。",
+      "createdAt": "2025-01-18T22:33:00+08:00",
+      "meta": {
+        "place": "杭州",
+        "topic": [
+          "住宿",
+          "民宿"
+        ]
+      },
+      "emotion": {
+        "valence": 0.4,
+        "arousal": 0.45,
+        "cues": [
+          "想"
+        ]
+      },
+      "weight": 0.5,
+      "mentions": 1,
+      "sourceRefs": [
+        "turn-2"
+      ]
+    },
+    {
+      "id": "turn-trip-03",
+      "kind": "event",
+      "tier": "hot",
+      "subject": "user",
+      "text": "用户确认四月的杭州行程已订好。",
+      "createdAt": "2025-04-05T19:40:00+08:00",
+      "meta": {
+        "time": "2025-04-05",
+        "place": "杭州",
+        "topic": [
+          "旅行"
+        ]
+      },
+      "emotion": {
+        "valence": 0.35,
+        "arousal": 0.4,
+        "cues": []
+      },
+      "weight": 0.6,
+      "mentions": 1,
+      "sourceRefs": [
+        "turn-3"
+      ]
+    },
+    {
+      "id": "turn-trip-04",
+      "kind": "musing",
+      "tier": "hot",
+      "subject": "user",
+      "text": "用户说没看到满开的樱花，有点遗憾。",
+      "createdAt": "2025-04-05T19:52:00+08:00",
+      "meta": {
+        "time": "2025-04",
+        "place": "杭州",
+        "topic": [
+          "樱花"
+        ]
+      },
+      "emotion": {
+        "valence": -0.3,
+        "arousal": 0.4,
+        "cues": [
+          "遗憾"
+        ]
+      },
+      "weight": 0.45,
+      "mentions": 1,
+      "sourceRefs": [
+        "turn-4"
+      ]
+    }
+  ],
+  "expectedRecall": [
+    {
+      "query": "杭州 樱花",
+      "expectIds": [
+        "turn-trip-01",
+        "turn-trip-04"
+      ],
+      "vectorUsable": false,
+      "reason": "一月的记录靠 meta.time=2025-04 与地点/主题捞回"
+    },
+    {
+      "query": "民宿",
+      "expectIds": [
+        "turn-trip-02"
+      ],
+      "vectorUsable": false,
+      "reason": "住宿类事实"
+    },
+    {
+      "query": "四月 行程",
+      "expectIds": [
+        "turn-trip-03"
+      ],
+      "vectorUsable": false,
+      "reason": "最近一次确认"
+    }
+  ]
+}

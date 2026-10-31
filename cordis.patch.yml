@@ -1,0 +1,34 @@
+# DSH 插件注册补丁
+# 用 insert 而不是覆盖：不动宿主已有的插件列表，同一个 profile 里其它插件照常加载
+- insert:
+    - id: dsh-mnemos
+      name: 'dsh-mnemos'
+      # 下面全部是**示例**，全部注释掉等于用默认值跑，不是关掉插件。
+      # config:
+      #   enabled: true              # 关掉只停记忆功能，不卸载插件
+      #   dataDir: null              # 默认 <profile 目录>/dsh-mnemos；换目录等于换一份记忆
+      #   mode: general              # general | companion，companion 更爱主动引用记忆
+      #
+      #   hotTokenBudget: 1200       # 「热记忆」段落最多占多少 token
+      #   injectTokenBudget: 600     # 单轮检索结果注入的上限
+      #   topN: 6                    # 单轮最多挑几条记忆
+      #
+      #   vector:
+      #     enabled: auto            # auto | off | on，auto 表示探到配置齐全才开
+      #     provider: none           # none | local | api
+      #     model: null
+      #     endpoint: null
+      #     apiKeyEnv: null          # 只写环境变量名，密钥本身不进配置文件
+      #
+      #   proactive:
+      #     enabled: true
+      #     quoteThreshold: 0.62     # 高于它才「直接引用」
+      #     askThreshold: 0.45       # 高于它才「试探性提起」
+      #     noiseFloor: 0.18         # 低于它当噪音丢掉
+      #     maxPerTurn: 1            # 一轮最多主动提几次
+      #
+      #   ingest:
+      #     llm: auto                # auto | off，是否让模型帮忙抽事实
+      #     everyTurns: 20           # 攒够多少轮做一次归纳
+      #
+      #   debug: false

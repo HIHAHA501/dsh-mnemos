@@ -1,0 +1,178 @@
+{
+  "$schema": "dsh-mnemos/fixture-conversation@1",
+  "fixture": "conversation-lowmood",
+  "synthetic": true,
+  "notice": "全部内容为虚构，不含任何真实用户数据。用于验证情绪线索与「先别开玩笑」的状态层。",
+  "scenario": "情绪低落",
+  "now": "2025-03-08T23:30:00+08:00",
+  "note": "tier=state 的记录是持续成立的状态，heatOf 对它不做时间衰减、budget.project 也不裁它。",
+  "turns": [
+    {
+      "at": "2025-03-08T21:05:00+08:00",
+      "role": "user",
+      "text": "这周加班太多了，真的很累。"
+    },
+    {
+      "at": "2025-03-08T21:07:00+08:00",
+      "role": "assistant",
+      "text": "听起来不太好受，要不要早点休息？"
+    },
+    {
+      "at": "2025-03-08T21:10:00+08:00",
+      "role": "user",
+      "text": "昨晚失眠到三点，躺着也睡不着。"
+    },
+    {
+      "at": "2025-03-08T21:14:00+08:00",
+      "role": "user",
+      "text": "有点担心项目赶不上进度。"
+    },
+    {
+      "at": "2025-03-08T21:20:00+08:00",
+      "role": "user",
+      "text": "今天先别跟我开玩笑，我想安静一会儿。"
+    }
+  ],
+  "records": [
+    {
+      "id": "turn-mood-01",
+      "kind": "turn",
+      "tier": "hot",
+      "subject": "user",
+      "text": "用户说这周加班太多，真的很累。",
+      "createdAt": "2025-03-08T21:05:00+08:00",
+      "meta": {
+        "time": "2025-03-08",
+        "topic": [
+          "加班",
+          "疲惫"
+        ]
+      },
+      "emotion": {
+        "valence": -0.55,
+        "arousal": 0.62,
+        "cues": [
+          "累",
+          "加班"
+        ]
+      },
+      "weight": 0.6,
+      "mentions": 1,
+      "sourceRefs": [
+        "turn-1"
+      ]
+    },
+    {
+      "id": "turn-mood-02",
+      "kind": "event",
+      "tier": "hot",
+      "subject": "user",
+      "text": "用户昨晚失眠到三点，躺着也睡不着。",
+      "createdAt": "2025-03-08T21:10:00+08:00",
+      "meta": {
+        "time": "2025-03-07",
+        "topic": [
+          "睡眠",
+          "失眠"
+        ]
+      },
+      "emotion": {
+        "valence": -0.4,
+        "arousal": 0.5,
+        "cues": [
+          "失眠",
+          "睡不着"
+        ]
+      },
+      "weight": 0.55,
+      "mentions": 1,
+      "sourceRefs": [
+        "turn-3"
+      ]
+    },
+    {
+      "id": "turn-mood-03",
+      "kind": "fact",
+      "tier": "hot",
+      "subject": "user",
+      "text": "用户担心项目赶不上进度。",
+      "createdAt": "2025-03-08T21:14:00+08:00",
+      "meta": {
+        "topic": [
+          "工作",
+          "进度"
+        ]
+      },
+      "emotion": {
+        "valence": -0.45,
+        "arousal": 0.55,
+        "cues": [
+          "担心"
+        ]
+      },
+      "weight": 0.55,
+      "mentions": 1,
+      "sourceRefs": [
+        "turn-4"
+      ]
+    },
+    {
+      "id": "state-mood-01",
+      "kind": "profile",
+      "tier": "state",
+      "subject": "self",
+      "text": "当前状态：用户低落，先别开玩笑，语气放轻，少给建议。",
+      "createdAt": "2025-03-08T21:20:00+08:00",
+      "meta": {
+        "time": "2025-03-08"
+      },
+      "emotion": {
+        "valence": -0.5,
+        "arousal": 0.4,
+        "cues": [
+          "低落"
+        ]
+      },
+      "weight": 0.85,
+      "mentions": 2,
+      "pinned": false,
+      "sourceRefs": [
+        "turn-5"
+      ]
+    }
+  ],
+  "expectedRecall": [
+    {
+      "query": "累",
+      "expectIds": [
+        "turn-mood-01"
+      ],
+      "vectorUsable": false,
+      "reason": "短查询靠正文单字命中"
+    },
+    {
+      "query": "失眠 睡不着",
+      "expectIds": [
+        "turn-mood-02"
+      ],
+      "vectorUsable": false,
+      "reason": "情绪线索与正文同现"
+    },
+    {
+      "query": "进度 担心",
+      "expectIds": [
+        "turn-mood-03"
+      ],
+      "vectorUsable": false,
+      "reason": "工作类事实"
+    },
+    {
+      "query": "开玩笑",
+      "expectIds": [
+        "state-mood-01"
+      ],
+      "vectorUsable": false,
+      "reason": "state 层永远进上下文，这条是预算不裁的证明"
+    }
+  ]
+}

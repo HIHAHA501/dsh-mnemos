@@ -1,0 +1,169 @@
+{
+  "$schema": "dsh-mnemos/fixture-conversation@1",
+  "fixture": "conversation-chat",
+  "synthetic": true,
+  "notice": "全部内容为虚构，不含任何真实用户数据。人名、地点、时间均为杜撰，可直接进仓库。",
+  "scenario": "日常闲聊",
+  "now": "2025-03-01T21:00:00+08:00",
+  "note": "records 用 normalizeRecord 载入即可保留 id（createRecord 会另发新 id）；createdAt 用 ISO 串。",
+  "turns": [
+    {
+      "at": "2025-03-01T09:12:00+08:00",
+      "role": "user",
+      "text": "今天风挺大的，周末想去海边走走。"
+    },
+    {
+      "at": "2025-03-01T09:13:00+08:00",
+      "role": "assistant",
+      "text": "海边风也大，记得带外套。"
+    },
+    {
+      "at": "2025-03-01T09:20:00+08:00",
+      "role": "user",
+      "text": "其实我不太喜欢太吵的地方，海边正好。"
+    },
+    {
+      "at": "2025-03-01T15:40:00+08:00",
+      "role": "user",
+      "text": "最近在学做手冲咖啡，磨豆机还没买。"
+    },
+    {
+      "at": "2025-03-01T20:55:00+08:00",
+      "role": "assistant",
+      "text": "那周六上午十点出门？"
+    },
+    {
+      "at": "2025-03-01T20:56:00+08:00",
+      "role": "user",
+      "text": "行，就周六上午十点。"
+    }
+  ],
+  "records": [
+    {
+      "id": "turn-chat-01",
+      "kind": "turn",
+      "tier": "hot",
+      "subject": "user",
+      "text": "用户说周末想去海边走走，因为风大反而觉得凉快。",
+      "createdAt": "2025-03-01T09:12:00+08:00",
+      "meta": {
+        "time": "2025-03-01",
+        "place": "海边",
+        "topic": [
+          "周末",
+          "散步"
+        ]
+      },
+      "emotion": {
+        "valence": 0.22,
+        "arousal": 0.35,
+        "cues": [
+          "想去"
+        ]
+      },
+      "weight": 0.45,
+      "mentions": 1,
+      "sourceRefs": [
+        "turn-1"
+      ]
+    },
+    {
+      "id": "turn-chat-02",
+      "kind": "fact",
+      "tier": "hot",
+      "subject": "user",
+      "text": "用户不喜欢太吵的地方，偏好安静的户外。",
+      "createdAt": "2025-03-01T09:20:00+08:00",
+      "meta": {
+        "topic": [
+          "偏好",
+          "噪音"
+        ]
+      },
+      "emotion": {
+        "valence": 0.05,
+        "arousal": 0.3,
+        "cues": []
+      },
+      "weight": 0.6,
+      "mentions": 1,
+      "sourceRefs": [
+        "turn-3"
+      ]
+    },
+    {
+      "id": "turn-chat-03",
+      "kind": "fact",
+      "tier": "hot",
+      "subject": "user",
+      "text": "用户最近在学做手冲咖啡，磨豆机还没买。",
+      "createdAt": "2025-03-01T15:40:00+08:00",
+      "meta": {
+        "topic": [
+          "兴趣",
+          "咖啡"
+        ]
+      },
+      "emotion": {
+        "valence": 0.3,
+        "arousal": 0.4,
+        "cues": [
+          "学"
+        ]
+      },
+      "weight": 0.55,
+      "mentions": 1,
+      "sourceRefs": [
+        "turn-4"
+      ]
+    },
+    {
+      "id": "turn-chat-04",
+      "kind": "event",
+      "tier": "hot",
+      "subject": "world",
+      "text": "约好周六上午十点出门去海边。",
+      "createdAt": "2025-03-01T20:56:00+08:00",
+      "meta": {
+        "time": "2025-03-01",
+        "place": "海边"
+      },
+      "emotion": {
+        "valence": 0.25,
+        "arousal": 0.35,
+        "cues": []
+      },
+      "weight": 0.5,
+      "mentions": 1,
+      "sourceRefs": [
+        "turn-6"
+      ]
+    }
+  ],
+  "expectedRecall": [
+    {
+      "query": "海边",
+      "expectIds": [
+        "turn-chat-01"
+      ],
+      "vectorUsable": false,
+      "reason": "bm25+meta 就够，不需要向量"
+    },
+    {
+      "query": "咖啡",
+      "expectIds": [
+        "turn-chat-03"
+      ],
+      "vectorUsable": false,
+      "reason": "关键词直命中"
+    },
+    {
+      "query": "安静 吵",
+      "expectIds": [
+        "turn-chat-02"
+      ],
+      "vectorUsable": false,
+      "reason": "偏好类事实靠正文词命中"
+    }
+  ]
+}

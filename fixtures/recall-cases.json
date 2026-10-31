@@ -1,0 +1,84 @@
+{
+  "$schema": "dsh-mnemos/fixture-recall-cases@1",
+  "version": 1,
+  "synthetic": true,
+  "notice": "全部内容为虚构，不含任何真实用户数据。",
+  "usage": [
+    "每条 case 把 fixtures 里对应 conversation 文件的 records 载入 store（用 normalizeRecord 保留 id）",
+    "再用 createBm25/createMetaIndex 建索引，rank({ query, records, metaIndex, bm25, now })",
+    "vectorUsable=false 时额外传 vectors 会改变权重（effectiveWeights 会把 vector 的 0.15 重新分配）"
+  ],
+  "cases": [
+    {
+      "id": "case-chat-sea",
+      "fixture": "fixtures/conversation-chat.json",
+      "now": "2025-03-01T21:00:00+08:00",
+      "query": "海边",
+      "expectIds": [
+        "turn-chat-01"
+      ],
+      "expectTopN": 3,
+      "vectorUsable": false,
+      "note": "纯关键词 + 地点元数据，不需要向量通道"
+    },
+    {
+      "id": "case-chat-coffee",
+      "fixture": "fixtures/conversation-chat.json",
+      "now": "2025-03-01T21:00:00+08:00",
+      "query": "手冲咖啡 磨豆机",
+      "expectIds": [
+        "turn-chat-03"
+      ],
+      "expectTopN": 3,
+      "vectorUsable": false,
+      "note": "兴趣类事实"
+    },
+    {
+      "id": "case-mood-insomnia",
+      "fixture": "fixtures/conversation-lowmood.json",
+      "now": "2025-03-08T23:30:00+08:00",
+      "query": "失眠",
+      "expectIds": [
+        "turn-mood-02"
+      ],
+      "expectTopN": 3,
+      "vectorUsable": false,
+      "note": "情绪线索与正文同现；向量通道不可用时情绪仍由 estimateEmotion 保留在记录上"
+    },
+    {
+      "id": "case-mood-state",
+      "fixture": "fixtures/conversation-lowmood.json",
+      "now": "2025-03-08T23:30:00+08:00",
+      "query": "开玩笑",
+      "expectIds": [
+        "state-mood-01"
+      ],
+      "expectTopN": 3,
+      "vectorUsable": false,
+      "note": "tier=state 的记录由 budget.project 无条件保留，不参与裁剪"
+    },
+    {
+      "id": "case-crossmonth-hangzhou",
+      "fixture": "fixtures/conversation-crossmonth-recall.json",
+      "now": "2025-04-06T10:00:00+08:00",
+      "query": "杭州 樱花",
+      "expectIds": [
+        "turn-trip-01"
+      ],
+      "expectTopN": 4,
+      "vectorUsable": false,
+      "note": "一月的记录（createdAt 2025-01-18）要能被四月的查询召回，靠 meta.time=2025-04"
+    },
+    {
+      "id": "case-crossmonth-miss",
+      "fixture": "fixtures/conversation-crossmonth-recall.json",
+      "now": "2025-04-06T10:00:00+08:00",
+      "query": "kubernetes",
+      "expectIds": [],
+      "expectTopN": 4,
+      "vectorUsable": false,
+      "expectMaxScore": 0.2,
+      "note": "反例：语料里没有的主题，不允许凭空命中。用 ASCII 查询词是故意的——中文单字在 tokenize 里会被切成单字，任何共享一个常用字的查询都可能凭一个字命中（实测：查询「量子计算机」会命中 turn-trip-01，因为「计划」里有「计」，score=0.679），这是分词层的已知限制而不是检索错误，见 README「已知限制」"
+    }
+  ]
+}
