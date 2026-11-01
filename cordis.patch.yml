@@ -14,7 +14,7 @@
           kind: http
           url: /api/dsh-persona-dafeiyu
           adapter: dafeiyu
-          refresh: startup
+          refresh: turn        # 跟随 dafeiyu 切换：60 秒节流、fire-and-forget
       # 下面全部是**示例**，全部注释掉等于用默认值跑，不是关掉插件。
       # config:
       #   enabled: true              # 关掉只停记忆功能，不卸载插件

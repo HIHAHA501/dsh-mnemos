@@ -93,10 +93,17 @@ function renderStatus(deps) {
       " · " + personaTrigger +
       (personaHash ? "（hash " + personaHash.slice(0, 4) + "…）" : "")
   );
-  // 记忆记录是全局单开关：没有会话维度，所以不再显示会话短码
+  // 三态可读：全局默认 / 本会话（覆盖 或 跟随默认）
   const captureRaw = typeof deps.capture === "function" ? deps.capture() : deps.capture;
   const captureSnap = captureRaw && typeof captureRaw === "object" ? captureRaw : {};
-  lines.push("记忆记录：" + (captureSnap.enabled === false ? "关" : "开") + "（全局）");
+  const captureSession = captureSnap.session && typeof captureSnap.session === "object" ? captureSnap.session : {};
+  const sessionId = typeof captureSession.id === "string" ? captureSession.id : "";
+  const sessionText = !sessionId
+    ? "无会话"
+    : captureSession.overridden === true
+      ? (captureSession.enabled === true ? "开" : "关") + "（会话 " + sessionId.slice(0, 8) + "）"
+      : "跟随默认（会话 " + sessionId.slice(0, 8) + "）";
+  lines.push("记忆：默认 " + (captureSnap.default === false ? "关" : "开") + " · 本会话 " + sessionText);
   const filtered = Number.isFinite(ingest.filtered) ? ingest.filtered : 0;
   if (filtered > 0) {
     const by = ingest.filteredBy || {};

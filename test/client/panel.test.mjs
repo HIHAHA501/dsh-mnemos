@@ -540,11 +540,11 @@ async function mountPanel(reply) {
     return componentOf(captured, "settings.section").component();
   };
   // surface: dock / hero —— 两个真实实例，各自一份 hooks 状态，只靠广播同步
-  const renderPill = (surface) => {
+  const renderPill = (surface, props) => {
     const which = surface === "hero" ? "hero" : "dock";
     index = 0;
     frame = "pill-" + which;
-    return componentOf(captured, which === "hero" ? "conversation.hero.options" : "conversation.composer.dock").component();
+    return componentOf(captured, which === "hero" ? "conversation.hero.options" : "conversation.composer.dock").component(props);
   };
   render();
   await tick();
@@ -696,40 +696,97 @@ test("操作卡：404 也按 body.error 显示，不吞成裸状态码", async (
 
 /* --------------------------------------------------------- 会话级开关 */
 
-function captureReply(enabled, options = {}) {
+/**
+ * v3 载荷夹具：{ default, session, sessions }。
+ * options: { default, active, overrides: {id: enabled}, failPost }
+ */
+function captureReply(options = {}) {
+  const def = options.default !== false;
+  const overrides = options.overrides || {};
+  const activeId = typeof options.active === "string" ? options.active : null;
+  const sessions = Object.keys(overrides).map((id) => ({ id, enabled: overrides[id], overridden: true, at: 1 }));
   return (opt, body) => {
     if (opt.method === "POST") {
       if (options.failPost) return { status: 500, body: { ok: false, error: "写不进去", code: "internal" } };
-      return { body: { ok: true, enabled: body && typeof body.enabled === "boolean" ? body.enabled : !enabled, scope: "global" } };
+      if (body && body.scope === "session" && typeof body.sessionId === "string") {
+        return { body: { ok: true, scope: "session", sessionId: body.sessionId, enabled: body.enabled === null ? def : body.enabled } };
+      }
+      return { body: { ok: true, scope: "global", enabled: body && typeof body.enabled === "boolean" ? body.enabled : def } };
     }
-    return { body: { stats: { count: 1 }, budget: {}, vector: { state: "on" }, recalls: [], capture: { enabled, default: true, scope: "global" } } };
+    const active = activeId
+      ? { id: activeId, enabled: activeId in overrides ? overrides[activeId] : def, overridden: activeId in overrides }
+      : { id: null, enabled: def, overridden: false };
+    return { body: { stats: { count: 1 }, budget: {}, vector: { state: "on" }, recalls: [], capture: { default: def, session: active, sessions } } };
   };
 }
 
-test("会话开关：胶囊初始态取自 GET 的 capture.enabled", async () => {
-  const { renderPill } = await mountPanel(captureReply(true));
+test("会话开关：没有覆盖时胶囊显示「跟随默认」", async () => {
+  const { renderPill } = await mountPanel(captureReply({ default: true }));
   const tree = renderPill();
-  assert.ok(texts(tree).includes("记忆 · 开"), texts(tree));
+  assert.ok(texts(tree).includes("记忆 · 默认（开）"), texts(tree));
   const dot = findAll(tree, (n) => n.tag === "span" && n.props.style && n.props.style.background)[0];
   assert.ok(dot, "胶囊要有个状态点");
 });
 
-test("会话开关：点击发 POST capture，enabled 取反，成功后按返回值更新", async () => {
-  const { calls, renderPill } = await mountPanel(captureReply(true));
+function pillTextOf(cap, opts) {
+  const { exports } = loadClient();
+  return texts(exports.__test.renderCapturePill(cap, null, makeReactWith().react.createElement, opts));
+}
+
+test("会话开关：三态文案（覆盖开 / 覆盖关 / 跟随默认）都能渲染", () => {
+  const cap = {
+    status: "ready",
+    default: true,
+    session: { id: "s-on", enabled: true, overridden: true },
+    sessions: [
+      { id: "s-on", enabled: true, overridden: true },
+      { id: "s-off", enabled: false, overridden: true },
+      { id: "s-def", enabled: true, overridden: false },
+    ],
+    note: "",
+  };
+  assert.ok(pillTextOf(cap, { sessionId: "s-on" }).includes("记忆 · 开"));
+  assert.ok(pillTextOf(cap, { sessionId: "s-off" }).includes("记忆 · 关"));
+  assert.ok(pillTextOf(cap, { sessionId: "s-def" }).includes("记忆 · 默认（开）"));
+  assert.ok(pillTextOf(cap, { sessionId: "s-unknown" }).includes("记忆 · 默认（开）"), "没见过的会话跟默认");
+  assert.ok(pillTextOf(cap, { scope: "global" }).includes("记忆 · 开"), "全局开关显示默认值本身");
+});
+
+test("会话开关：带 sessionId 时 POST 是 scope:session", async () => {
+  const { calls, renderPill } = await mountPanel(captureReply({ default: true, active: "s-1" }));
+  renderPill("dock", { sessionId: "s-1" });
+  await tick();
+  findAll(renderPill("dock", { sessionId: "s-1" }), (n) => n.tag === "button")[0].props.onClick();
+  await tick();
+  await tick();
+  const sent = posts(calls).filter((c) => c.body.action === "capture")[0];
+  assert.ok(sent, "应当发出 capture");
+  assert.deepEqual(sent.body, { action: "capture", scope: "session", sessionId: "s-1", enabled: false }, "带 sessionId 走会话级");
+});
+
+test("会话开关：没有 sessionId 时退化为 scope:global", async () => {
+  const { calls, renderPill } = await mountPanel(captureReply({ default: true }));
   renderPill();
   await tick();
-  const tree = renderPill();
-  assert.ok(texts(tree).includes("记忆 · 开"));
-  findAll(tree, (n) => n.tag === "button")[0].props.onClick();
+  findAll(renderPill(), (n) => n.tag === "button")[0].props.onClick();
+  await tick();
+  await tick();
+  const sent = posts(calls).filter((c) => c.body.action === "capture")[0];
+  assert.deepEqual(sent.body, { action: "capture", scope: "global", enabled: false }, "没有会话身份就改全局默认");
+});
+
+test("会话开关：点击只发一次 POST，成功后按返回值更新文案", async () => {
+  const { calls, renderPill } = await mountPanel(captureReply({ default: true }));
+  renderPill();
+  await tick();
+  assert.ok(texts(renderPill()).includes("记忆 · 默认（开）"));
+  findAll(renderPill(), (n) => n.tag === "button")[0].props.onClick();
   await tick();
   await tick();
   const capturePosts = posts(calls).filter((c) => c.body.action === "capture");
   assert.equal(capturePosts.length, 1, "点击只发一次 POST");
-  const sent = capturePosts[0];
-  assert.equal(sent.body.enabled, false, "从开切成关");
-  assert.deepEqual(Object.keys(sent.body).sort(), ["action", "enabled"], "body 只有 action 与 enabled，不再带 sessionId");
-  assert.equal("sessionId" in sent.body, false);
-  assert.equal(texts(renderPill()).includes("记忆 · 关"), true);
+  assert.equal(capturePosts[0].body.enabled, false, "从开切成关");
+  assert.equal(texts(renderPill()).includes("记忆 · 默认（关）"), true, texts(renderPill()));
 });
 
 test("会话开关：失败显示「记忆 · 失败」，2 秒后回退", async () => {
@@ -737,7 +794,7 @@ test("会话开关：失败显示「记忆 · 失败」，2 秒后回退", async
   const react = makeReactWith();
   const fetchImpl = async (url, options) => {
     const opt = options || {};
-    const res = captureReply(true, { failPost: true })(opt, opt.body ? JSON.parse(opt.body) : null);
+    const res = captureReply({ failPost: true })(opt, opt.body ? JSON.parse(opt.body) : null);
     const status = res.status === undefined ? 200 : res.status;
     return { ok: status < 400, status, text: async () => JSON.stringify(res.body) };
   };
@@ -762,7 +819,7 @@ test("会话开关：失败显示「记忆 · 失败」，2 秒后回退", async
   const revert = timers.filter((t) => t.ms === 2000)[0];
   assert.ok(revert, "失败后要排一个 2 秒回退");
   revert.fn();
-  assert.ok(texts(pill()).includes("记忆 · 开"), "回退到点击前的状态");
+  assert.ok(texts(pill()).includes("记忆 · 默认（开）"), "回退到点击前的状态");
 });
 
 test("会话开关：面板操作卡与胶囊共用同一份状态", async () => {
@@ -772,24 +829,66 @@ test("会话开关：面板操作卡与胶囊共用同一份状态", async () =>
   render();
   await tick();
   const card = findAll(render(), (n) => n.tag === "button" && texts(n).trim() === "记忆 · 开")[0];
-  assert.ok(card, "操作卡顶部要有同一枚开关");
+  assert.ok(card, "操作卡顶部要有全局开关");
   card.props.onClick();
   await tick();
   await tick();
   const sent = posts(calls).filter((c) => c.body.action === "capture")[0];
   assert.ok(sent, "面板也要发同一个 POST");
-  assert.ok(texts(renderPill()).includes("记忆 · 关"), "胶囊跟着变：" + texts(renderPill()));
+  assert.equal(sent.body.scope, "global", "设置页顶部是全局默认");
+  assert.ok(texts(renderPill()).includes("记忆 · 默认（关）"), "胶囊跟着变：" + texts(renderPill()));
 });
 
-test("全局开关：视图模型只透出 enabled / default / scope，没有会话维度", () => {
+test("视图模型：capture 透出 default / session / sessions 三段", () => {
   const { exports } = loadClient();
-  const view = exports.__test.buildViewModel({ capture: { enabled: false, default: true, scope: "global" } });
-  assert.equal(view.capture.enabled, false);
-  assert.equal(view.capture.default, true);
-  assert.equal(view.capture.scope, "global");
-  assert.equal("sessionId" in view.capture, false, "载荷不再有会话维度");
+  const view = exports.__test.buildViewModel({
+    capture: {
+      default: false,
+      session: { id: "s-9", enabled: true, overridden: true },
+      sessions: [{ id: "s-9", enabled: true, overridden: true, at: 5 }, { id: "s-8", enabled: false, overridden: false, at: 4 }],
+    },
+  });
+  assert.equal(view.capture.default, false);
+  assert.equal(view.capture.session.id, "s-9");
+  assert.equal(view.capture.session.enabled, true);
+  assert.equal(view.capture.session.overridden, true);
+  assert.equal(view.capture.sessions.length, 2);
+  assert.equal(view.capture.sessions[0].id, "s-9");
   const blank = exports.__test.buildViewModel({});
-  assert.equal(blank.capture.enabled, true, "缺省按开启");
+  assert.equal(blank.capture.default, true, "缺省按开启");
+  assert.equal(blank.capture.session.id, null);
+  assert.equal(blank.capture.sessions.length, 0);
+});
+
+test("设置页：会话列表每行按自己的 id 发 scope:session", async () => {
+  const { calls, render } = await mountPanel(captureReply({ default: true, active: "s-9", overrides: { "s-a": true, "s-b": false } }));
+  render();
+  await tick();
+  const tree = render();
+  assert.ok(texts(tree).includes("最近的会话"), texts(tree).slice(0, 240));
+  const switches = findAll(tree, (n) => n.tag === "button" && ["开", "关", "默认"].indexOf(texts(n).trim()) >= 0);
+  assert.ok(switches.length >= 2, "至少两行各有一个开关");
+  switches[0].props.onClick();
+  await tick();
+  await tick();
+  const sent = posts(calls).filter((c) => c.body.action === "capture")[0];
+  assert.equal(sent.body.scope, "session");
+  assert.ok(["s-a", "s-b"].indexOf(sent.body.sessionId) >= 0, "带的必须是那一行的 id：" + sent.body.sessionId);
+});
+
+test("设置页：本会话行可以单独改", async () => {
+  const { calls, render } = await mountPanel(captureReply({ default: true, active: "s-9" }));
+  render();
+  await tick();
+  const tree = render();
+  assert.ok(texts(tree).includes("本会话："), texts(tree).slice(0, 240));
+  const btn = findAll(tree, (n) => n.tag === "button" && texts(n).trim() === "改本会话")[0];
+  assert.ok(btn, "要有「改本会话」");
+  btn.props.onClick();
+  await tick();
+  await tick();
+  const sent = posts(calls).filter((c) => c.body.action === "capture")[0];
+  assert.deepEqual(sent.body, { action: "capture", scope: "session", sessionId: "s-9", enabled: false });
 });
 
 /* ------------------------------------------------------- 首屏 hero + 主题 */
@@ -800,13 +899,13 @@ test("胶囊在 hero 与 dock 两处渲染同一组件，且共享同一份状�
   void captured;
   const dockTree = renderPill("dock");
   const heroTree = renderPill("hero");
-  assert.ok(texts(dockTree).includes("记忆 · 开"));
-  assert.ok(texts(heroTree).includes("记忆 · 开"), "hero 首屏也要有同一枚胶囊");
+  assert.ok(texts(dockTree).includes("记忆 · 默认（开）"));
+  assert.ok(texts(heroTree).includes("记忆 · 默认（开）"), "hero 首屏也要有同一枚胶囊");
   // 点 hero 那枚，dock 那枚跟着变（同一份 actionStore + 广播）
   findAll(heroTree, (n) => n.tag === "button")[0].props.onClick();
   await tick();
   await tick();
-  assert.ok(texts(renderPill("dock")).includes("记忆 · 关"), "一处点击，另一处同步：" + texts(renderPill("dock")));
+  assert.ok(texts(renderPill("dock")).includes("记忆 · 默认（关）"), "一处点击，另一处同步：" + texts(renderPill("dock")));
 });
 
 test("主题：文字/边框/底色走宿主 token，深色值兜底", () => {

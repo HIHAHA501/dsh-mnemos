@@ -433,15 +433,25 @@ export function createIngest(options = {}) {
   }
 
   /** 把攒下的记录写进库；写满 everyTurns 轮时同步跑一次合并。 */
-  /** 全局「记忆记录」开关：关了就跳过写入（已有记忆不删、不改，检索照旧）。 */
-  function captureOn() {
+  /** 记忆开关：会话覆盖优先，没覆盖就跟随全局默认；关了就跳过写入（已有记忆不删不改）。 */
+  function captureOn(sessionId) {
     if (!captureStore || typeof captureStore.isEnabled !== "function") return true;
     const fallback = !(config.ingest && config.ingest.capture === false);
     try {
-      return captureStore.isEnabled(fallback) !== false;
+      return captureStore.isEnabled(sessionId, fallback) !== false;
     } catch {
       // 开关读不出来就当开着：宁可多记，也别因为一个开关文件丢了整段对话
       return true;
+    }
+  }
+
+  /** 记下「见过这个会话」，供面板列出可单独开关的会话。 */
+  function noteSession(sessionId) {
+    if (!captureStore || typeof captureStore.touch !== "function") return;
+    try {
+      captureStore.touch(sessionId);
+    } catch {
+      // 记不上只是列表少一行，不影响写入
     }
   }
 
@@ -450,7 +460,7 @@ export function createIngest(options = {}) {
     const batch = pending.splice(0, pending.length);
     let written = 0;
     for (const record of batch) {
-      if (!captureOn()) {
+      if (!captureOn(record && record.sessionId)) {
         counters.skippedByCapture += 1;
         continue;
       }
@@ -537,6 +547,7 @@ export function createIngest(options = {}) {
       counters.filtered += 1;
       return { stored: 0, filtered: reason };
     }
+    noteSession(sessionId);
     const key = ingestKey(sessionId, event, text);
     if (seen.has(key)) {
       counters.duplicates += 1;

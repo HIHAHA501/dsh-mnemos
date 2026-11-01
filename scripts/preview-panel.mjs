@@ -130,7 +130,17 @@ const actionsDemo = {
   rowStatus: {},
   confirmingId: "turn-a2",
   searchStatus: { state: "ok", text: "命中 2 条" },
-  capture: { status: "ready", enabled: true, default: true, note: "" },
+  capture: {
+    status: "ready",
+    default: true,
+    session: { id: "s-9f3a1c22", enabled: true, overridden: true },
+    sessions: [
+      { id: "s-9f3a1c22", enabled: true, overridden: true, at: 3 },
+      { id: "s-71b0e4d8", enabled: false, overridden: true, at: 2 },
+      { id: "s-2c5f77aa", enabled: true, overridden: false, at: 1 },
+    ],
+    note: "",
+  },
 };
 const realWidth = { html: serialize(renderBlocks(buildViewModel(normalPayload), hStub, null, { tab: "overview", actions: actionsDemo })) };
 // 同一份 HTML 放两个主题上下文：深色用 :root 变量，浅色用 .lightTheme 覆盖
@@ -139,18 +149,25 @@ const duo = (html) =>
   '<div><p class="themeTag">浅色主题</p><div class="surface light"><div class="lightTheme">' + html + "</div></div></div></div>";
 
 // 输入区胶囊三态 + 一个 composer 尺寸的 mock 条
-const pillOf = (state) => serialize(api.__test.renderCapturePill(state, null, hStub));
+const pillOf = (state, opts) => serialize(api.__test.renderCapturePill(state, null, hStub, opts));
 // 全局开关的四种态：开 / 关 / 未知 / 失败
+const pillCap = (overridden, enabled) => ({
+  status: "ready",
+  default: true,
+  session: { id: "s-9f3a1c22", enabled, overridden },
+  sessions: [{ id: "s-9f3a1c22", enabled, overridden, at: 1 }],
+  note: "",
+});
 const CAPTURE_STATES = [
-  { key: "on", state: { status: "ready", enabled: true, default: true, note: "" } },
-  { key: "off", state: { status: "ready", enabled: false, default: true, note: "" } },
-  { key: "unknown", state: { status: "unknown", enabled: false, default: true, note: "" } },
-  { key: "failed", state: { status: "failed", enabled: true, default: true, note: "写不进去" } },
+  { key: "on", state: pillCap(true, true) },
+  { key: "off", state: pillCap(true, false) },
+  { key: "default", state: pillCap(false, true) },
+  { key: "failed", state: { status: "failed", default: true, session: { id: "s-9f3a1c22", enabled: true, overridden: true }, sessions: [], note: "写不进去" } },
 ];
 const pillsHtml = [
   '<div class="composerMock">',
   '<span class="cmSlot">模型</span><span class="cmSlot">权限</span>',
-  CAPTURE_STATES.map((entry) => pillOf(entry.state)).join(""),
+  CAPTURE_STATES.map((entry) => pillOf(entry.state, { sessionId: "s-9f3a1c22" })).join(""),
   "</div>",
   '<p class="cap" style="margin-top:10px">同一枚开关在面板「操作」卡顶部的四态：</p>',
   '<div class="capStates">',

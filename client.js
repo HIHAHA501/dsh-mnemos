@@ -681,7 +681,13 @@ const TIER_CHOICES = ["hot", "cold", "persona", "state"];
 const TIER_TEXT = { hot: "热", cold: "冷", persona: "人格", state: "状态" };
 const ACTION_TIMEOUT_MS = 8000;
 const FORGET_CONFIRM_MS = 3000;
-const EMPTY_CAPTURE = { status: "unknown", enabled: false, default: true, note: "" };
+const EMPTY_CAPTURE = {
+  status: "unknown", // unknown | ready | sending | failed
+  default: true,
+  session: { id: null, enabled: true, overridden: false },
+  sessions: [],
+  note: "",
+};
 const EMPTY_ACTIONS = { query: "", rows: [], rowStatus: {}, confirmingId: "", searchStatus: null, capture: EMPTY_CAPTURE };
 
 /**
@@ -742,11 +748,38 @@ function emitCapture(snapshot) {
   }
 }
 
-function captureLabel(state) {
-  const s = asObject(state);
-  if (s.status === "failed") return CAPTURE_TEXT.failed;
-  if (s.status === "sending" || s.status === "unknown") return CAPTURE_TEXT.unknown;
-  return s.enabled ? CAPTURE_TEXT.on : CAPTURE_TEXT.off;
+/** 找某个会话在 capture 里的条目：先看会话表，再看宿主认为的活跃会话。 */
+function findCaptureEntry(capture, sessionId) {
+  const s = asObject(capture);
+  if (typeof sessionId === "string" && sessionId) {
+    const list = asList(s.sessions);
+    for (let i = 0; i < list.length; i += 1) if (list[i] && list[i].id === sessionId) return list[i];
+    const active = asObject(s.session);
+    if (active.id === sessionId) return active;
+    return null;
+  }
+  const active = asObject(s.session);
+  return active.id ? active : null;
+}
+
+function defaultLabel(on) {
+  return "记忆 · 默认（" + (on ? "开" : "关") + "）";
+}
+
+/**
+ * 三态文案：覆盖开/覆盖关/跟随默认；未知与失败另有文案。
+ * 返回值里的 effective 是这一下点击要翻转的“当前有效值”。
+ */
+function captureDisplay(capture, sessionId) {
+  const s = asObject(capture);
+  if (s.status === "failed") return { text: CAPTURE_TEXT.failed, dot: C.danger, effective: false, overridden: false, known: false };
+  if (s.status !== "ready") return { text: CAPTURE_TEXT.unknown, dot: C.dim, effective: false, overridden: false, known: false };
+  const fallback = s.default !== false;
+  const entry = findCaptureEntry(s, sessionId);
+  if (!entry) return { text: defaultLabel(fallback), dot: C.dim, effective: fallback, overridden: false, known: true };
+  const on = entry.enabled !== false;
+  if (entry.overridden) return { text: on ? CAPTURE_TEXT.on : CAPTURE_TEXT.off, dot: on ? C.pink : C.dim, effective: on, overridden: true, known: true };
+  return { text: defaultLabel(on), dot: C.dim, effective: on, overridden: false, known: true };
 }
 
 function captureDotColor(state) {
@@ -756,24 +789,106 @@ function captureDotColor(state) {
   return s.enabled ? C.pink : C.dim;
 }
 
-/** 输入区小胶囊 / 操作卡里的同一枚开关：同一份状态、同一次 POST。 */
-function renderCapturePill(state, onToggle, h) {
-  const s = asObject(state);
+/** 全局默认那枚开关的显示态。 */
+function globalDisplay(capture) {
+  const s = asObject(capture);
+  if (s.status === "failed") return { text: CAPTURE_TEXT.failed, dot: C.danger, effective: false, known: false };
+  if (s.status !== "ready") return { text: CAPTURE_TEXT.unknown, dot: C.dim, effective: false, known: false };
+  const on = s.default !== false;
+  return { text: on ? CAPTURE_TEXT.on : CAPTURE_TEXT.off, dot: on ? C.pink : C.dim, effective: on, known: true };
+}
+
+/** 会话行的状态文案：覆盖 or 跟随默认。 */
+function sessionStateText(capture, sessionId) {
+  const view = captureDisplay(asObject(capture), sessionId);
+  if (!view.known) return "未知";
+  if (view.overridden) return view.effective ? "开（覆盖）" : "关（覆盖）";
+  return "跟随默认（" + (view.effective ? "开" : "关") + "）";
+}
+
+function shortId(id) {
+  const s = String(id || "");
+  return s.length > 10 ? s.slice(0, 8) + "…" : s;
+}
+
+/** 会话列表行里的小开关：开 / 关 / 默认。 */
+function renderSessionSwitch(capture, sessionId, onToggle, h) {
+  const view = captureDisplay(asObject(capture), sessionId);
+  const text = !view.known ? "…" : view.overridden ? (view.effective ? "开" : "关") : "默认";
+  return h(
+    "button",
+    {
+      key: "sw-" + sessionId,
+      type: "button",
+      "aria-pressed": view.known ? Boolean(view.effective) : false,
+      title: "切换这个会话的记忆开关",
+      onClick: () => {
+        if (typeof onToggle === "function") onToggle(sessionId);
+      },
+      style: S.miniBtn,
+    },
+    text,
+  );
+}
+
+/** POST 成功后把返回值并进本地快照：不额外再打一次 GET。 */
+function applyCaptureResult(base, res, body) {
+  const next = {
+    status: "ready",
+    default: base.default !== false,
+    session: Object.assign({}, asObject(base.session)),
+    sessions: asList(base.sessions).map((row) => Object.assign({}, row)),
+    note: "",
+  };
+  const enabled = res && typeof res.enabled === "boolean" ? res.enabled : null;
+  if (body && body.scope === "session" && typeof body.sessionId === "string") {
+    const id = body.sessionId;
+    const entry = { id, enabled: enabled === null ? next.default : enabled, overridden: enabled !== null, at: Date.now() };
+    const at = next.sessions.findIndex((row) => row.id === id);
+    if (at >= 0) next.sessions[at] = entry;
+    else next.sessions.unshift(entry);
+    if (next.session.id === id) {
+      next.session.enabled = entry.enabled;
+      next.session.overridden = entry.overridden;
+    }
+  } else {
+    if (enabled !== null) next.default = enabled;
+    next.sessions = next.sessions.map((row) => (row.overridden ? row : Object.assign({}, row, { enabled: next.default })));
+    if (!next.session.overridden) next.session.enabled = next.default;
+  }
+  return next;
+}
+
+/** 老接口：只要文案。 */
+function captureLabel(capture) {
+  return captureDisplay(capture, "").text;
+}
+
+/**
+ * 同一枚开关：opts.scope === "global" 显示全局默认，否则显示 opts.sessionId 那个会话。
+ * onToggle 收到 "global" 或具体 sessionId，由调用方决定发什么 POST。
+ */
+function renderCapturePill(capture, onToggle, h, opts) {
+  const o = asObject(opts);
+  const globalScope = o.scope === "global";
+  const sessionId = globalScope ? "" : typeof o.sessionId === "string" ? o.sessionId : "";
+  const s = asObject(capture);
+  const view = globalScope ? globalDisplay(s) : captureDisplay(s, sessionId);
   return h(
     "button",
     {
       key: "capture",
       type: "button",
-      "aria-pressed": s.status === "ready" ? Boolean(s.enabled) : false,
-      title: s.status === "failed" ? String(s.note || "切换失败") : "这个会话要不要记进长期记忆",
+      "aria-pressed": view.known ? Boolean(view.effective) : false,
+      title: s.status === "failed" ? String(s.note || "切换失败") : globalScope ? "新会话的默认值" : "这个会话要不要记进长期记忆",
       onClick: () => {
-        if (typeof onToggle === "function") onToggle();
+        if (typeof onToggle === "function") onToggle(globalScope ? "global" : sessionId);
       },
       style: S.pill,
     },
     [
-      h("span", { key: "d", style: Object.assign({}, S.pillDot, { background: captureDotColor(s) }) }),
-      h("span", { key: "t" }, captureLabel(s)),
+      h("span", { key: "d", style: Object.assign({}, S.pillDot, { background: view.dot }) }),
+      h("span", { key: "t" }, view.text),
     ],
   );
 }
@@ -848,12 +963,38 @@ function renderActionsCard(state, handlers, h) {
 
   const body = rows.length ? rowNodes : [h("div", { key: "none", style: S.soft }, "输入关键词回车搜索；这里只列命中的前 8 条。")];
 
-  const captureRow = h("div", { key: "capture", style: S.captureRow }, [
-    renderCapturePill(asObject(s.capture), on.onCaptureToggle, h),
-    h("span", { key: "hint", style: { fontSize: 11, color: C.text3 } }, "本会话是否写入长期记忆"),
-  ]);
+  const capture = asObject(s.capture);
+  const active = asObject(capture.session);
+  const sessionRows = asList(capture.sessions);
+  const captureRows = [
+    h("div", { key: "cap-global", style: S.captureRow }, [
+      renderCapturePill(capture, on.onCaptureToggle, h, { scope: "global" }),
+      h("span", { key: "hint", style: { fontSize: 11, color: C.text3 } }, "新会话的默认值"),
+    ]),
+    active.id
+      ? h("div", { key: "cap-session", style: S.captureRow }, [
+          h("span", { key: "l", style: { flex: 1, fontSize: 11.5, color: C.text2 } }, "本会话：" + sessionStateText(capture, active.id) + " · " + shortId(active.id)),
+          h("button", { key: "b", type: "button", style: S.miniBtn, onClick: () => on.onCaptureToggle && on.onCaptureToggle(active.id) }, "改本会话"),
+        ])
+      : null,
+    sessionRows.length
+      ? h(
+          "div",
+          { key: "cap-list", style: { display: "flex", flexDirection: "column", gap: 6 } },
+          [h("div", { key: "t", style: { fontSize: 11, color: C.text3 } }, "最近的会话")].concat(
+            sessionRows.slice(0, 20).map((row, i) =>
+              h("div", { key: "row" + i, style: { display: "flex", alignItems: "center", gap: 8 } }, [
+                h("span", { key: "id", style: { fontSize: 11, color: C.text3, fontVariantNumeric: "tabular-nums", minWidth: 64 } }, shortId(row.id)),
+                h("span", { key: "st", style: { flex: 1, fontSize: 11, color: C.text2 } }, sessionStateText(capture, row.id)),
+                renderSessionSwitch(capture, row.id, on.onCaptureToggle, h),
+              ]),
+            ),
+          ),
+        )
+      : null,
+  ];
 
-  return h("section", { key: "actions", style: S.cardLight }, [headRow(h, "actions", "操作"), captureRow, searchRow, statusLine].concat(body));
+  return h("section", { key: "actions", style: S.cardLight }, [headRow(h, "actions", "操作")].concat(captureRows, [searchRow, statusLine], body));
 }
 
 /* ------------------------------------------------------------ 视图模型 */
@@ -911,11 +1052,23 @@ function buildViewModel(input) {
     },
     vector: { state: vectorState, reason: vectorReason, label: VECTOR_LABELS[vectorState] || "未知状态", usable: vectorState === "on" },
     // 会话级开关：enabled=这个会话要不要写记忆，default=全局默认
-    // 全局开关：管所有会话，没有会话级差异
+    // 全局默认 + 会话覆盖 + 最近见过的会话列表
     capture: {
-      enabled: asObject(source.capture).enabled !== false,
       default: asObject(source.capture).default !== false,
-      scope: "global",
+      session: {
+        id: typeof asObject(asObject(source.capture).session).id === "string" ? asObject(source.capture).session.id : null,
+        enabled: asObject(asObject(source.capture).session).enabled !== false,
+        overridden: asObject(asObject(source.capture).session).overridden === true,
+      },
+      sessions: asList(asObject(source.capture).sessions)
+        .slice(0, 20)
+        .map((row) => ({
+          id: String(asObject(row).id || ""),
+          enabled: asObject(row).enabled !== false,
+          overridden: asObject(row).overridden === true,
+          at: Number.isFinite(asObject(row).at) ? asObject(row).at : 0,
+        }))
+        .filter((row) => row.id),
     },
     recalls,
     storage: {
@@ -1167,9 +1320,9 @@ function renderAbout(h) {
       "这是本机面板：非本机地址访问会被直接拒绝，所以这些操作只在你自己的机器上生效。",
     ]),
     section("about-capture", "要不要记进长期记忆", [
-      "「记忆 · 开 / 关」是一个**全局开关**：管所有会话，不针对某一个对话。首屏在「标准模式」那一行，进了会话后在输入框右侧，面板「操作」卡顶部也有一份，三处同步。",
-      "关掉只影响之后的写入：已经记住的一条都不删，检索与注入照旧；再打开就继续记。默认是开。",
-      "开关存在本机（capture.json），重启后还在；全局没有设置过时按 ingest.capture 的默认值走。",
+      "全局是默认值；每个会话可以单独覆盖，胶囊改的就是你当前这个会话。首屏、输入框、设置页三处同步。",
+      "胶囊显示「记忆 · 开 / 关」＝这个会话被单独设过；「记忆 · 默认（开 / 关）」＝它跟随全局默认。设置页还能看到最近的会话列表，逐个改。",
+      "关掉只影响之后的写入：已经记住的一条都不删，检索与注入照旧；再打开就继续记。状态存在本机（capture.json）。",
       "另外，工具清单、子代理回报、工作上下文这类系统内容不会被写进记忆；被挡下的条数在 /mem status 的「已过滤」一行。",
     ]),
     section("about-privacy", "隐私与只读", [
@@ -1336,18 +1489,24 @@ function register(ctx, React) {
        * 全局开关：只发一次 POST，不再带 sessionId、也不再先 GET。
        * 翻转方向以上一次 GET/POST 返回的 enabled 为准；失败 2 秒后回退到点击前的值。
        */
-      onCaptureToggle() {
+      onCaptureToggle(target) {
         if (actionStore.captureBusy) return;
         const previous = Object.assign({}, actionStore.capture);
-        const target = !previous.enabled;
+        if (previous.status === "sending") return;
+        const sessionId = typeof target === "string" && target && target !== "global" ? target : "";
+        const view = sessionId ? captureDisplay(previous, sessionId) : globalDisplay(previous);
+        const enabledNow = view.known ? view.effective : previous.default !== false;
+        const body = sessionId
+          ? { action: "capture", scope: "session", sessionId, enabled: !enabledNow }
+          : { action: "capture", scope: "global", enabled: !enabledNow };
         actionStore.captureBusy = true;
         push({ capture: Object.assign({}, previous, { status: "sending", note: "" }) });
-        postAction({ action: "capture", enabled: target })
+        postAction(body)
           .then((res) => {
             actionStore.captureBusy = false;
             if (!res || res.ok !== true) {
-              push({ capture: { status: "failed", enabled: previous.enabled, default: previous.default, note: String((res && res.error) || "切换失败") } });
-              // 2 秒后回退到点击前的状态（不用 confirm/alert）
+              push({ capture: Object.assign({}, previous, { status: "failed", note: String((res && res.error) || "切换失败") }) });
+              // 2 秒后回退到点击前的快照（不用 confirm/alert）
               if (actionStore.captureTimer) clearTimeout(actionStore.captureTimer);
               actionStore.captureTimer = setTimeout(() => {
                 actionStore.captureTimer = null;
@@ -1355,18 +1514,11 @@ function register(ctx, React) {
               }, 2000);
               return;
             }
-            push({
-              capture: {
-                status: "ready",
-                enabled: typeof res.enabled === "boolean" ? res.enabled : target,
-                default: previous.default,
-                note: "",
-              },
-            });
+            push({ capture: applyCaptureResult(previous, res, body) });
           })
           .catch((error) => {
             actionStore.captureBusy = false;
-            push({ capture: { status: "failed", enabled: previous.enabled, default: previous.default, note: errText(error) } });
+            push({ capture: Object.assign({}, previous, { status: "failed", note: errText(error) }) });
           });
       },
       /** 两步忘记：第一次只武装确认，3 秒内再点才真发；点别的行会换目标并重置计时。 */
@@ -1442,7 +1594,7 @@ function register(ctx, React) {
           // 面板拿到的 capture 就是会话真的开关：灌进共享状态，胶囊那边立刻同步
           const cap = result.view ? result.view.capture : null;
           if (cap && actionStore.capture.status === "unknown") {
-            actionStore.capture = { status: "ready", enabled: cap.enabled !== false, default: cap.default !== false, note: "" };
+            actionStore.capture = Object.assign({ status: "ready", note: "" }, cap);
             emitCapture(actionStore.capture);
           }
         });
@@ -1475,7 +1627,9 @@ function register(ctx, React) {
   }
 
   /** 输入区那一带的小胶囊：和面板共用 actionStore.capture，谁改了另一边都会收到广播。 */
-  function CapturePill() {
+  function CapturePill(props) {
+    // 宿主给插槽组件的 props 里带 sessionId（dafeiyu/client.js:1646 同款用法）
+    const sessionId = props && typeof props.sessionId === "string" ? props.sessionId : "";
     const st = hooks ? hooks.useState(Object.assign({}, actionStore.capture)) : [EMPTY_CAPTURE, () => {}];
     const state = st[0];
     const setState = st[1];
@@ -1493,7 +1647,7 @@ function register(ctx, React) {
             actionStore.captureLoading = false;
             const cap = result && result.view ? result.view.capture : null;
             if (!cap) return;
-            actionStore.capture = { status: "ready", enabled: cap.enabled !== false, default: cap.default !== false, note: "" };
+            actionStore.capture = Object.assign({ status: "ready", note: "" }, cap);
             setState(Object.assign({}, actionStore.capture));
             emitCapture(actionStore.capture);
           })
@@ -1503,9 +1657,9 @@ function register(ctx, React) {
         return undefined;
       }, []);
     }
-    if (!hooks) return renderCapturePill(EMPTY_CAPTURE, null, h);
+    if (!hooks) return renderCapturePill(EMPTY_CAPTURE, null, h, { sessionId });
     const view = asObject(state).capture || state;
-    return renderCapturePill(view, () => actionHandlers(setState).onCaptureToggle(), h);
+    return renderCapturePill(view, () => actionHandlers(setState).onCaptureToggle(sessionId || "global"), h, { sessionId });
   }
 
   // 同一个组件挂两处：首屏 hero 与会话内 composer dock；两处共用 actionStore.capture

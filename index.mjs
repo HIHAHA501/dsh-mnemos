@@ -715,9 +715,9 @@ function panelRead(runtime, res) {
     vector: typeof runtime.index.vectorStatus === "function" ? runtime.index.vectorStatus() : { state: "off" },
     recalls: Array.isArray(last.recalls) ? last.recalls : [],
     capture: (function () {
-      // GET 只暴露契约里的三键；lastChangeAt 留给 /mem status 与面板快照
+      // GET 只暴露契约里的三段：全局默认 / 当前会话 / 见过的会话列表
       const snapshot = runtime.captureSnapshot();
-      return { enabled: snapshot.enabled, default: snapshot.default, scope: snapshot.scope };
+      return { default: snapshot.default, session: snapshot.session, sessions: snapshot.sessions };
     })(),
   });
 }
@@ -814,13 +814,41 @@ function panelAction(runtime, body, res) {
   }
 
   if (action === "capture") {
+    const rawScope = typeof body.scope === "string" ? body.scope.trim().toLowerCase() : "";
+    // 不带 scope 的旧请求按 global 处理，手机端/老客户端不该因为升级而报错
+    const scope = rawScope === "" ? "global" : rawScope;
+    if (scope !== "global" && scope !== "session") {
+      panelFail(res, 400, "scope 只能是 global 或 session", "bad-request");
+      return;
+    }
+    const fallback = !(runtime.config.ingest && runtime.config.ingest.capture === false);
+    if (scope === "session") {
+      const requested = typeof body.sessionId === "string" ? body.sessionId.trim() : "";
+      const sessionId = requested || runtime.lastSessionId || "";
+      if (!sessionId) {
+        panelFail(res, 404, "还没有活跃会话，且请求没带 sessionId", "not-found");
+        return;
+      }
+      const clearing = body.enabled === null;
+      if (!clearing && typeof body.enabled !== "boolean") {
+        panelFail(res, 400, "enabled 必须是 true / false / null（null = 清除覆盖）", "bad-request");
+        return;
+      }
+      runtime.captureStore.setSession(sessionId, clearing ? null : body.enabled);
+      jsonResponse(res, 200, {
+        ok: true,
+        scope: "session",
+        sessionId: sessionId,
+        enabled: runtime.captureStore.isEnabled(sessionId, fallback),
+      });
+      return;
+    }
     if (typeof body.enabled !== "boolean") {
       panelFail(res, 400, "enabled 必须是 true 或 false", "bad-request");
       return;
     }
-    // 旧客户端可能还带 sessionId：接受但忽略，全局开关没有会话维度
-    const saved = runtime.captureStore.set(body.enabled);
-    jsonResponse(res, 200, { ok: true, enabled: saved === true, scope: "global" });
+    const value = runtime.captureStore.setDefault(body.enabled);
+    jsonResponse(res, 200, { ok: true, scope: "global", enabled: value });
     return;
   }
 
@@ -1110,14 +1138,36 @@ export function mount(ctx, rawConfig, overrides) {
       return notes.slice();
     },
     captureSnapshot() {
-      // 全局单一开关：没有会话级差异，lastSessionId 不再参与任何 capture 判定
+      // 三部分：全局默认 / 当前会话（含是否被覆盖）/ 见过的会话列表（at 倒序，最多 20 个）
+      const store = runtime.captureStore || captureStore;
       const fallback = !(config.ingest && config.ingest.capture === false);
-      const doc = captureStore.all();
+      const doc = store.all();
+      const defaultOn = store.defaultOf(fallback);
+      const entries = Object.keys(doc.sessions || {}).map(function (id) {
+        const entry = doc.sessions[id] || {};
+        const overridden = typeof entry.enabled === "boolean";
+        return {
+          id: id,
+          at: Number.isFinite(entry.at) ? entry.at : 0,
+          overridden: overridden,
+          enabled: overridden ? entry.enabled : defaultOn,
+        };
+      });
+      entries.sort(function (left, right) {
+        if (right.at !== left.at) return right.at - left.at;
+        return left.id < right.id ? -1 : left.id > right.id ? 1 : 0;
+      });
+      const sessionId = runtime.lastSessionId || "";
+      const current = sessionId ? entries.filter(function (entry) { return entry.id === sessionId; })[0] : null;
       return {
-        enabled: captureStore.isEnabled(fallback),
-        default: fallback,
-        scope: "global",
-        lastChangeAt: Number.isFinite(doc.at) ? doc.at : 0,
+        default: defaultOn,
+        session: {
+          id: sessionId || null,
+          enabled: sessionId ? store.isEnabled(sessionId, fallback) : defaultOn,
+          overridden: Boolean(current && current.overridden),
+        },
+        sessions: entries.slice(0, 20),
+        lastChangeAt: current ? current.at : 0,
       };
     },
     track(value) {
