@@ -155,7 +155,11 @@ function safeHeat(record, at) {
  * @returns {Array} 排序结果行。
  */
 export function rankRecords(input = {}) {
-  const records = Array.isArray(input.records) ? input.records.filter((record) => record && !record.mergedInto) : [];
+  // persona/state 是「设定」不是「往事」：它们由 [人设与状态] 段或外部人格插件负责，
+  // 混进检索会让同一段文字注入两遍，也会让主动召回用「我想起…」复述人格
+  const records = Array.isArray(input.records)
+    ? input.records.filter((record) => record && !record.mergedInto && !isPersistent(record))
+    : [];
   if (!records.length) return [];
   const now = Number.isFinite(input.now) ? input.now : Date.now();
   const rows = rank({
@@ -273,9 +277,11 @@ export function renderInjection(options = {}) {
   const records = Array.isArray(options.records) ? options.records : [];
   const proactive = config.proactive || {};
 
-  const rows = options.ranked
+  const ranked = options.ranked
     ? options.ranked
     : rankRecords({ query: options.query, records, index: options.index, now, limit: RANK_POOL });
+  // 调用方直接塞 ranked 时也要挡住常驻层：top 决定主动召回档位，不能是设定
+  const rows = Array.isArray(ranked) ? ranked.filter((row) => row && row.record && !isPersistent(row.record)) : [];
   const top = rows[0] || null;
 
   let decision;

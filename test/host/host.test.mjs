@@ -9,7 +9,7 @@ import { estimateTokens } from "../../src/budget.mjs";
 import { resolveConfig } from "../../src/config.mjs";
 import { createRecord } from "../../src/record.mjs";
 import { createStore } from "../../src/store.mjs";
-import { createRetrievalIndex, INSTRUCTION, renderInjection } from "../../src/host/inject.mjs";
+import { createRetrievalIndex, INSTRUCTION, rankRecords, renderInjection } from "../../src/host/inject.mjs";
 import { demoteSweep, extractMeta, writeFilterReason } from "../../src/host/ingest.mjs";
 import { CAPTURE_FILE, createCaptureStore } from "../../src/capture.mjs";
 import { buildFoldText, isFoldMessage, messagesTokens, projectMessages, repairBoundary } from "../../src/host/project.mjs";
@@ -2096,4 +2096,77 @@ test("人格源：相对 url 但拿不到 origin → note 提示并跳过，插�
   assert.equal(runtime.persona.code, "no-origin");
   assert.ok(runtime.degraded().some((line) => line.includes("人格源未就绪（无 webServer.origin）")), runtime.degraded().join(" | "));
 });
+
+/* ------------------------------------------- 常驻层不进「相关记忆」（第 9 轮修复） */
+
+function tierFixture(now) {
+  return [
+    createRecord({ kind: "profile", tier: "persona", subject: "self", text: "你叫林深，说话简短，遇到猫会放慢语速", weight: 0.95, createdAt: now, updatedAt: now }, { now }),
+    createRecord({ kind: "turn", text: "用户养了一只叫年糕的橘猫，晚上会踩键盘", weight: 0.6, createdAt: now, updatedAt: now }, { now }),
+  ];
+}
+
+test("常驻层①：rankRecords 不返回 persona/state", () => {
+  const now = Date.now();
+  const config = resolveConfig({ dataDir: "/tmp/x" });
+  const records = tierFixture(now);
+  records.push(createRecord({ kind: "profile", tier: "state", subject: "self", text: "现在是深夜，她说累了", weight: 0.9, createdAt: now, updatedAt: now }, { now }));
+  const index = createRetrievalIndex({ config });
+  index.load(records);
+  const rows = rankRecords({ query: "年糕 林深 深夜", records, index, now, limit: 10 });
+  assert.deepEqual(rows.map(function (row) { return row.record.tier; }), ["hot"]);
+});
+
+test("常驻层②：persona 与 hot 都在时，只把 hot 当作往事（persona 只出现在人设段）", () => {
+  const now = Date.now();
+  const config = resolveConfig({ dataDir: "/tmp/x", mode: "companion" });
+  const records = tierFixture(now);
+  const index = createRetrievalIndex({ config });
+  index.load(records);
+  const out = renderInjection({ query: "年糕 橘猫 林深", records, index, config, now });
+  assert.deepEqual(out.picks.map(function (row) { return row.tier; }), ["hot"], "picks 里不许有 persona");
+  assert.ok(out.text.includes("[相关记忆]"));
+  assert.ok(out.text.includes("[人设与状态]"), "self 模式人设段照旧");
+  assert.equal(out.text.split("你叫林深").length - 1, 1, "人格文本只能出现一次（人设段）");
+  assert.ok(out.text.includes("年糕"));
+});
+
+test("常驻层③：只剩 persona 时不出相关记忆、主动召回 silence、人设段仍在", () => {
+  const now = Date.now();
+  const config = resolveConfig({ dataDir: "/tmp/x", mode: "companion" });
+  const records = [tierFixture(now)[0]];
+  const index = createRetrievalIndex({ config });
+  index.load(records);
+  const out = renderInjection({ query: "林深", records, index, config, now });
+  assert.equal(out.decision.state, "silence");
+  assert.equal(out.picks.length, 0);
+  assert.equal(out.text.includes("[相关记忆]"), false);
+  assert.equal(out.text.includes("主动想起"), false, "不许用「我想起…」复述人格");
+  assert.ok(out.text.includes("[人设与状态]"), "人设段必须还在");
+});
+
+test("常驻层④：只剩 state 时同样 silence", () => {
+  const now = Date.now();
+  const config = resolveConfig({ dataDir: "/tmp/x", mode: "companion" });
+  const records = [createRecord({ kind: "profile", tier: "state", subject: "self", text: "现在是深夜，她说累了", weight: 0.9, createdAt: now, updatedAt: now }, { now })];
+  const index = createRetrievalIndex({ config });
+  index.load(records);
+  const out = renderInjection({ query: "深夜 累了", records, index, config, now });
+  assert.equal(out.decision.state, "silence");
+  assert.equal(out.text.includes("主动想起"), false);
+});
+
+test("常驻层⑤：调用方直传 ranked 时也挡住常驻层（top 不能是设定）", () => {
+  const now = Date.now();
+  const config = resolveConfig({ dataDir: "/tmp/x", mode: "companion" });
+  const records = tierFixture(now);
+  const ranked = [
+    { record: records[0], score: 0.99, parts: {}, partsNorm: {} },
+    { record: records[1], score: 0.5, parts: {}, partsNorm: {} },
+  ];
+  const out = renderInjection({ query: "年糕", records, ranked, config, now });
+  assert.equal(out.rows.length, 1, "ranked 里的 persona 要被过滤掉");
+  assert.equal(out.decision.score, 0.5, "top 应当是 hot 那条");
+});
+
 
