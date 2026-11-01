@@ -891,6 +891,65 @@ test("设置页：本会话行可以单独改", async () => {
   assert.deepEqual(sent.body, { action: "capture", scope: "session", sessionId: "s-9", enabled: false });
 });
 
+test("跟随默认：只有被覆盖的行才显示按钮，点击发 enabled:null", async () => {
+  const { calls, render } = await mountPanel(captureReply({ default: true, active: "s-a", overrides: { "s-a": true, "s-b": true } }));
+  render();
+  await tick();
+  const buttons = findAll(render(), (n) => n.tag === "button" && texts(n).trim() === "跟随默认");
+  assert.ok(buttons.length >= 1, "有覆盖的行要显示「跟随默认」");
+  buttons[0].props.onClick();
+  await tick();
+  await tick();
+  const sent = posts(calls).filter((c) => c.body.action === "capture")[0];
+  assert.equal(sent.body.action, "capture");
+  assert.equal(sent.body.scope, "session");
+  assert.equal(sent.body.enabled, null, "清除覆盖要发 null");
+  assert.ok(["s-a", "s-b"].indexOf(sent.body.sessionId) >= 0);
+  assert.equal(Object.keys(sent.body).length, 4);
+});
+
+test("跟随默认：没有覆盖就不显示按钮（不会摆死按钮）", async () => {
+  const none = await mountPanel(captureReply({ default: true, active: "s-a" }));
+  none.render();
+  await tick();
+  assert.equal(findAll(none.render(), (n) => n.tag === "button" && texts(n).trim() === "跟随默认").length, 0, "一条覆盖都没有时应当是 0 个");
+
+  const some = await mountPanel(captureReply({ default: true, active: "s-a", overrides: { "s-b": false } }));
+  some.render();
+  await tick();
+  assert.equal(findAll(some.render(), (n) => n.tag === "button" && texts(n).trim() === "跟随默认").length, 1, "只有 s-b 被覆盖");
+});
+
+test("跟随默认：失败时行内报错，2 秒后回退", async () => {
+  const timers = [];
+  const react = makeReactWith();
+  const fetchImpl = async (url, options) => {
+    const opt = options || {};
+    const res = captureReply({ default: true, active: "s-a", overrides: { "s-a": true }, failPost: true })(opt, opt.body ? JSON.parse(opt.body) : null);
+    const status = res.status === undefined ? 200 : res.status;
+    return { ok: status < 400, status, text: async () => JSON.stringify(res.body) };
+  };
+  const client = loadClient({
+    react: react.react,
+    extra: { fetch: fetchImpl, setTimeout: (fn, ms) => { timers.push({ fn, ms }); return timers.length; }, clearTimeout: () => {} },
+  });
+  const captured = [];
+  client.exports.apply({ get: () => ({ inject: (n, f) => captured.push(f), register: (d, c) => ({ d, c }) }) });
+  const panel = () => captured.map((f) => f()).filter((e) => e.d.name === "settings.section")[0].c();
+  panel();
+  await tick();
+  const btn = findAll(panel(), (n) => n.tag === "button" && texts(n).trim() === "跟随默认")[0];
+  assert.ok(btn, "要先有按钮");
+  btn.props.onClick();
+  await tick();
+  await tick();
+  assert.ok(texts(panel()).includes("写不进去"), "行内要显示原因");
+  const revert = timers.filter((t) => t.ms === 2000)[0];
+  assert.ok(revert, "要排 2 秒回退");
+  revert.fn();
+  assert.equal(texts(panel()).includes("写不进去"), false, "回退后错误消失");
+});
+
 /* ------------------------------------------------------- 首屏 hero + 主题 */
 
 test("胶囊在 hero 与 dock 两处渲染同一组件，且共享同一份状态", async () => {

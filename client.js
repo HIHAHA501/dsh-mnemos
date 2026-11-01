@@ -831,6 +831,26 @@ function renderSessionSwitch(capture, sessionId, onToggle, h) {
   );
 }
 
+/**
+ * 「跟随默认」= 清除这个会话的单独设置。只在 overridden === true 时由调用方渲染，
+ * 所以不会出现"点了没反应"的死按钮。
+ */
+function renderClearOverride(sessionId, onClear, h) {
+  return h(
+    "button",
+    {
+      key: "clr-" + sessionId,
+      type: "button",
+      title: "清除这个会话的单独设置，回到全局默认",
+      onClick: () => {
+        if (typeof onClear === "function") onClear(sessionId);
+      },
+      style: S.miniBtn,
+    },
+    "跟随默认",
+  );
+}
+
 /** POST 成功后把返回值并进本地快照：不额外再打一次 GET。 */
 function applyCaptureResult(base, res, body) {
   const next = {
@@ -964,6 +984,7 @@ function renderActionsCard(state, handlers, h) {
   const body = rows.length ? rowNodes : [h("div", { key: "none", style: S.soft }, "输入关键词回车搜索；这里只列命中的前 8 条。")];
 
   const capture = asObject(s.capture);
+  const errors = asObject(s.captureErrors);
   const active = asObject(capture.session);
   const sessionRows = asList(capture.sessions);
   const captureRows = [
@@ -972,9 +993,13 @@ function renderActionsCard(state, handlers, h) {
       h("span", { key: "hint", style: { fontSize: 11, color: C.text3 } }, "新会话的默认值"),
     ]),
     active.id
-      ? h("div", { key: "cap-session", style: S.captureRow }, [
-          h("span", { key: "l", style: { flex: 1, fontSize: 11.5, color: C.text2 } }, "本会话：" + sessionStateText(capture, active.id) + " · " + shortId(active.id)),
-          h("button", { key: "b", type: "button", style: S.miniBtn, onClick: () => on.onCaptureToggle && on.onCaptureToggle(active.id) }, "改本会话"),
+      ? h("div", { key: "cap-session", style: { display: "flex", flexDirection: "column", gap: 4 } }, [
+          h("div", { key: "l", style: S.captureRow }, [
+            h("span", { key: "t", style: { flex: 1, fontSize: 11.5, color: C.text2 } }, "本会话：" + sessionStateText(capture, active.id) + " · " + shortId(active.id)),
+            active.overridden === true ? renderClearOverride(active.id, on.onCaptureClear, h) : null,
+            h("button", { key: "b", type: "button", style: S.miniBtn, onClick: () => on.onCaptureToggle && on.onCaptureToggle(active.id) }, "改本会话"),
+          ]),
+          asObject(errors)[active.id] ? h("div", { key: "e", style: S.actErr }, String(errors[active.id])) : null,
         ])
       : null,
     sessionRows.length
@@ -983,10 +1008,14 @@ function renderActionsCard(state, handlers, h) {
           { key: "cap-list", style: { display: "flex", flexDirection: "column", gap: 6 } },
           [h("div", { key: "t", style: { fontSize: 11, color: C.text3 } }, "最近的会话")].concat(
             sessionRows.slice(0, 20).map((row, i) =>
-              h("div", { key: "row" + i, style: { display: "flex", alignItems: "center", gap: 8 } }, [
-                h("span", { key: "id", style: { fontSize: 11, color: C.text3, fontVariantNumeric: "tabular-nums", minWidth: 64 } }, shortId(row.id)),
-                h("span", { key: "st", style: { flex: 1, fontSize: 11, color: C.text2 } }, sessionStateText(capture, row.id)),
-                renderSessionSwitch(capture, row.id, on.onCaptureToggle, h),
+              h("div", { key: "row" + i, style: { display: "flex", flexDirection: "column", gap: 3 } }, [
+                h("div", { key: "l", style: { display: "flex", alignItems: "center", gap: 8 } }, [
+                  h("span", { key: "id", style: { fontSize: 11, color: C.text3, fontVariantNumeric: "tabular-nums", minWidth: 64 } }, shortId(row.id)),
+                  h("span", { key: "st", style: { flex: 1, fontSize: 11, color: C.text2 } }, sessionStateText(capture, row.id)),
+                  row.overridden === true ? renderClearOverride(row.id, on.onCaptureClear, h) : null,
+                  renderSessionSwitch(capture, row.id, on.onCaptureToggle, h),
+                ]),
+                asObject(errors)[row.id] ? h("div", { key: "e", style: S.actErr }, String(errors[row.id])) : null,
               ]),
             ),
           ),
@@ -1323,6 +1352,7 @@ function renderAbout(h) {
       "全局是默认值；每个会话可以单独覆盖，胶囊改的就是你当前这个会话。首屏、输入框、设置页三处同步。",
       "胶囊显示「记忆 · 开 / 关」＝这个会话被单独设过；「记忆 · 默认（开 / 关）」＝它跟随全局默认。设置页还能看到最近的会话列表，逐个改。",
       "关掉只影响之后的写入：已经记住的一条都不删，检索与注入照旧；再打开就继续记。状态存在本机（capture.json）。",
+      "会话行上的「跟随默认」＝清除这个会话的单独设置，回到全局默认；没设过的会话不显示这个按钮。",
       "另外，工具清单、子代理回报、工作上下文这类系统内容不会被写进记忆；被挡下的条数在 /mem status 的「已过滤」一行。",
     ]),
     section("about-privacy", "隐私与只读", [
@@ -1412,6 +1442,8 @@ function register(ctx, React) {
     searchStatus: null,
     timer: null,
     capture: Object.assign({}, EMPTY_CAPTURE),
+    captureErrors: {},
+    captureErrorTimers: {},
     captureTimer: null,
     captureBusy: false,
     captureLoading: false,
@@ -1427,6 +1459,7 @@ function register(ctx, React) {
         confirmingId: actionStore.confirmingId,
         searchStatus: actionStore.searchStatus,
         capture: actionStore.capture,
+        captureErrors: actionStore.captureErrors,
       });
       // 面板与输入区胶囊共用这一份状态：谁改了都要通知另一边
       emitCapture(actionStore.capture);
@@ -1519,6 +1552,42 @@ function register(ctx, React) {
           .catch((error) => {
             actionStore.captureBusy = false;
             push({ capture: Object.assign({}, previous, { status: "failed", note: errText(error) }) });
+          });
+      },
+      /**
+       * 清除这个会话的覆盖，回到跟随全局默认：POST enabled:null。
+       * 行内失败只影响这一行（写 captureErrors），2 秒后回退，不把整块打成「失败」。
+       */
+      onCaptureClear(sessionId) {
+        const id = typeof sessionId === "string" ? sessionId : "";
+        if (!id || actionStore.captureBusy) return;
+        const previous = Object.assign({}, actionStore.capture);
+        actionStore.captureBusy = true;
+        push({ captureErrors: Object.assign({}, actionStore.captureErrors, { [id]: "" }) });
+        postAction({ action: "capture", scope: "session", sessionId: id, enabled: null })
+          .then((res) => {
+            actionStore.captureBusy = false;
+            if (!res || res.ok !== true) {
+              const text = String((res && res.error) || "清除失败");
+              push({ captureErrors: Object.assign({}, actionStore.captureErrors, { [id]: text }) });
+              if (actionStore.captureErrorTimers[id]) clearTimeout(actionStore.captureErrorTimers[id]);
+              actionStore.captureErrorTimers[id] = setTimeout(() => {
+                actionStore.captureErrorTimers[id] = null;
+                const nextErrors = Object.assign({}, actionStore.captureErrors);
+                delete nextErrors[id];
+                push({ capture: previous, captureErrors: nextErrors });
+              }, 2000);
+              return;
+            }
+            // 服务端对清除的返回仍可能是布尔值；本地按契约记成「没有覆盖」
+            const cleared = applyCaptureResult(previous, { ok: true, scope: "session", sessionId: id, enabled: null }, { scope: "session", sessionId: id });
+            const nextErrors = Object.assign({}, actionStore.captureErrors);
+            delete nextErrors[id];
+            push({ capture: cleared, captureErrors: nextErrors });
+          })
+          .catch((error) => {
+            actionStore.captureBusy = false;
+            push({ captureErrors: Object.assign({}, actionStore.captureErrors, { [id]: errText(error) }) });
           });
       },
       /** 两步忘记：第一次只武装确认，3 秒内再点才真发；点别的行会换目标并重置计时。 */
