@@ -42,6 +42,8 @@ export const CONFIG_DEFAULTS = Object.freeze({
     llm: "auto",
     everyTurns: 20,
     capture: true,
+    filter: true,
+    skipSubagentSessions: true,
   }),
   projection: Object.freeze({
     enabled: true,
@@ -189,6 +191,8 @@ export function resolveConfig(input, options = {}) {
       llm: pickEnum(ingest.llm, INGEST_LLM, CONFIG_DEFAULTS.ingest.llm, "ingest.llm", warnings),
       everyTurns: pickInt(ingest.everyTurns, CONFIG_DEFAULTS.ingest.everyTurns, { min: 1, max: 10000 }, "ingest.everyTurns", warnings),
       capture: pickBool(ingest.capture, CONFIG_DEFAULTS.ingest.capture, "ingest.capture", warnings),
+      filter: pickBool(ingest.filter, CONFIG_DEFAULTS.ingest.filter, "ingest.filter", warnings),
+      skipSubagentSessions: pickBool(ingest.skipSubagentSessions, CONFIG_DEFAULTS.ingest.skipSubagentSessions, "ingest.skipSubagentSessions", warnings),
     },
     persona: {
       mode: pickEnum(persona.mode, PERSONA_MODES, CONFIG_DEFAULTS.persona.mode, "persona.mode", warnings),

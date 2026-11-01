@@ -98,6 +98,12 @@ function renderStatus(deps) {
   const captureSnap = captureRaw && typeof captureRaw === "object" ? captureRaw : {};
   const captureSession = typeof captureSnap.sessionId === "string" ? captureSnap.sessionId : "";
   lines.push("本会话记忆：" + (captureSnap.enabled === false ? "关" : "开") + "（会话 " + (captureSession ? captureSession.slice(0, 8) : "暂无") + "）");
+  const filtered = Number.isFinite(ingest.filtered) ? ingest.filtered : 0;
+  if (filtered > 0) {
+    const by = ingest.filteredBy || {};
+    const parts = Object.keys(by).filter(function (k) { return by[k] > 0; }).map(function (k) { return k + " " + by[k]; });
+    lines.push("已过滤：" + filtered + " 条（" + (parts.join(" · ") || "无明细") + "）");
+  }
   const notes = Array.isArray(deps.notes) ? deps.notes : [];
   // 降级记录前 5 条都露出来：像 ingest.llm 这种「配置项没实现」必须看得见
   if (notes.length) lines.push("degraded: " + notes.slice(0, 5).join(" | "));

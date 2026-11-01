@@ -572,6 +572,22 @@ apply: {"registered":true,"id":"dsh-mnemos"} label: 记忆星图
 
 1. **首屏与输入区是两个不同的宿主槽位**（`conversation.hero.options` 与 `conversation.composer.dock`）。宿主只在「已进会话且输入框非空」时渲染后者——这就是为什么在没有会话的首屏上，胶囊会出现在上面那一行、而不是输入框旁。
 2. **胶囊显示的会话以「点击那一刻」为准**：宿主没有暴露「会话切换」事件，所以你在胶囊可见期间切了会话但没点它，标签可能还是上一个会话的值；点一下会先拉最新状态再翻转，不会改错会话。
+### 什么不会被写进记忆（写入过滤器）
+
+不是所有进入会话的文本都算「经历」。写入前有一道过滤器，命中即丢弃、不占用记忆（默认开）：
+
+| 规则 | 判据 | 配置项 |
+| --- | --- | --- |
+| 系统提醒 | trim 后以 `<system-reminder` 开头（整块或前缀） | `ingest.filter` |
+| 子代理回报 | 以 `Agent <id> sent a message` / `Background subagent <id> …` 开头 | `ingest.filter` |
+| 工作上下文 | 以 `[Working Context:` 开头 | `ingest.filter` |
+| 工具清单样板 | 正文含 `The following tools are available in this session` | `ingest.filter` |
+| 子代理会话 | sessionId 是裸 UUID（你自己的会话是 `session-<uuid>`）→ 整段不记 | `ingest.skipSubagentSessions` |
+| 我们自己的注入 | 消息 `source.kind === 'dsh-mnemos'` | 恒开（避免自食其果） |
+
+被挡下的条数按桶计数，`/mem status` 有一行「已过滤：N 条（reminder 1 · subagentReport 2 …）」。两个开关都关掉时行为回到「什么都记」（排障用）。
+
+**一个刻意的取舍**：工具清单那条是「包含即拒」。如果你自己把一段工具清单粘进对话，它不会被记住——宁可漏记一条，也不要把系统样板当成记忆。反例（不该误杀）：正文里只是**提到** `system-reminder` 这个词、但不在开头，照常记录。
 ### 写入通道的安全门槛
 
 面板不再只读，所以宿主侧收紧了入口。写入请求必须**同时**满足五条，缺一条直接拒绝且**不碰存储**：

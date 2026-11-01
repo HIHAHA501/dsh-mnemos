@@ -25,6 +25,44 @@ const TURN_WEIGHT = 0.45;
 /** 不入库的消息来源：我们自己的注入不能反过来被当成用户说的话。 */
 const OWN_SOURCE = "dsh-mnemos";
 
+/** 过滤器分桶：stats().filteredBy 就按这几个键计数。 */
+export const FILTER_BUCKETS = Object.freeze([
+  "reminder",
+  "subagentReport",
+  "workingContext",
+  "toolsBoilerplate",
+  "subagentSession",
+  "ownInjected",
+]);
+
+// 子代理会话 id 是裸 UUID；用户自己的会话是 session-<uuid>（实机数据可证）
+const SUBAGENT_SESSION = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-/;
+// 子代理回报的两种开头：编排器转发与后台完成通知
+const SUBAGENT_REPORT = /^(Agent [0-9a-f-]{8,} sent a message|Background subagent [0-9a-f-]{8,} (finished|sent))/;
+// 这句只出现在工具清单里，出现即整条是系统样板
+const TOOLS_BOILERPLATE = "The following tools are available in this session";
+
+/**
+ * 写不写这条消息：返回分桶名，返回空串表示放行。
+ * 纯函数，规则的顺序就是「越确定越先判」：会话级 → 整条模板 → 前缀 → 包含。
+ * @param {{text?: string, sessionId?: string, filter?: boolean, skipSubagentSessions?: boolean}} input 判定输入。
+ * @returns {string} 分桶名或空串。
+ */
+export function writeFilterReason(input = {}) {
+  const text = typeof input.text === "string" ? input.text : "";
+  const trimmed = text.trim();
+  if (!trimmed) return "";
+  const sessionId = typeof input.sessionId === "string" ? input.sessionId.trim() : "";
+  if (input.skipSubagentSessions !== false && sessionId && SUBAGENT_SESSION.test(sessionId)) return "subagentSession";
+  if (input.filter === false) return "";
+  // 系统提醒整块：以标签开头就说明这条消息本身是提醒，不是人说的话
+  if (trimmed.startsWith("<system-reminder")) return "reminder";
+  if (SUBAGENT_REPORT.test(trimmed)) return "subagentReport";
+  if (trimmed.startsWith("[Working Context:")) return "workingContext";
+  if (trimmed.includes(TOOLS_BOILERPLATE)) return "toolsBoilerplate";
+  return "";
+}
+
 function fnv1a(text) {
   let hash = 0x811c9dc5;
   for (let i = 0; i < text.length; i += 1) {
@@ -338,7 +376,9 @@ export function createIngest(options = {}) {
 
   const seen = new Map();
   const pending = [];
-  const counters = { events: 0, stored: 0, duplicates: 0, skipped: 0, skippedByCapture: 0, batches: 0, turns: 0, merges: 0, mergeErrors: 0, lastMergeAt: 0, demoted: 0, revived: 0 };
+  const counters = { events: 0, stored: 0, duplicates: 0, skipped: 0, skippedByCapture: 0, filtered: 0, batches: 0, turns: 0, merges: 0, mergeErrors: 0, lastMergeAt: 0, demoted: 0, revived: 0 };
+  const filteredBy = {};
+  for (const bucket of FILTER_BUCKETS) filteredBy[bucket] = 0;
 
   function remember(key) {
     seen.set(key, true);
@@ -470,13 +510,33 @@ export function createIngest(options = {}) {
       return { stored: 0 };
     }
     const data = event.data;
-    if (data && typeof data === "object" && data.source && data.source.kind === OWN_SOURCE) return { stored: 0 };
+    const sessionId = session && typeof session.id === "string" ? session.id : "";
+    const ingestConfig = config.ingest || {};
+    const filterOn = ingestConfig.filter !== false;
+    if (data && typeof data === "object" && data.source && data.source.kind === OWN_SOURCE) {
+      // 我们自己的注入绝不回灌；关掉过滤器时也照旧拦着，只是不计数（排障时行为与旧版一致）
+      if (filterOn) {
+        filteredBy.ownInjected += 1;
+        counters.filtered += 1;
+      }
+      return { stored: 0 };
+    }
     const text = messageText(data);
     if (!text || text.length < 2) {
       counters.skipped += 1;
       return { stored: 0 };
     }
-    const sessionId = session && typeof session.id === "string" ? session.id : "";
+    const reason = writeFilterReason({
+      text,
+      sessionId,
+      filter: filterOn,
+      skipSubagentSessions: ingestConfig.skipSubagentSessions !== false,
+    });
+    if (reason) {
+      filteredBy[reason] += 1;
+      counters.filtered += 1;
+      return { stored: 0, filtered: reason };
+    }
     const key = ingestKey(sessionId, event, text);
     if (seen.has(key)) {
       counters.duplicates += 1;
@@ -515,7 +575,7 @@ export function createIngest(options = {}) {
   }
 
   function stats() {
-    return { ...counters, pending: pending.length, everyTurns };
+    return { ...counters, filteredBy: { ...filteredBy }, pending: pending.length, everyTurns };
   }
 
   return { handleEvent, flush, stats, runMerge };

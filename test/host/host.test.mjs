@@ -10,7 +10,7 @@ import { resolveConfig } from "../../src/config.mjs";
 import { createRecord } from "../../src/record.mjs";
 import { createStore } from "../../src/store.mjs";
 import { createRetrievalIndex, INSTRUCTION, renderInjection } from "../../src/host/inject.mjs";
-import { demoteSweep, extractMeta } from "../../src/host/ingest.mjs";
+import { demoteSweep, extractMeta, writeFilterReason } from "../../src/host/ingest.mjs";
 import { CAPTURE_FILE, createCaptureStore } from "../../src/capture.mjs";
 import { buildFoldText, isFoldMessage, messagesTokens, projectMessages, repairBoundary } from "../../src/host/project.mjs";
 import { decide, hasRecallConstraint, renderHint } from "../../src/host/proactive.mjs";
@@ -1877,3 +1877,138 @@ test("capture：全局默认 ingest.capture=false 时新会话默认不记", (t)
   emitTurn(listener, "global-off", 3, "会话级覆盖成开");
   assert.equal(runtime.store.all().length, 1);
 });
+
+/* ------------------------------------------------------ 写入过滤器（第 6 轮） */
+
+const SUBAGENT_SID = "db793fe6-1a2b-4c3d-8e9f-0123456789ab";
+const USER_SID = "session-db793fe6-1a2b-4c3d-8e9f-0123456789ab";
+const TOOLS_LINE = "<system-reminder> The following tools are available in this session: read, write. </system-reminder>";
+
+test("过滤器：六种分桶与放行的纯函数判定", () => {
+  assert.equal(writeFilterReason({ text: "<system-reminder>abc</system-reminder>" }), "reminder");
+  assert.equal(writeFilterReason({ text: "Agent db793fe6-1a2b sent a message: 你好" }), "subagentReport");
+  assert.equal(writeFilterReason({ text: "Background subagent db793fe6-1a2b finished and will do no further work" }), "subagentReport");
+  assert.equal(writeFilterReason({ text: "[Working Context: in progress: 写代码]" }), "workingContext");
+  assert.equal(writeFilterReason({ text: TOOLS_LINE }), "reminder");
+  assert.equal(writeFilterReason({ text: "开头随便写点什么 The following tools are available in this session 结束" }), "toolsBoilerplate");
+  assert.equal(writeFilterReason({ text: "正常一句话", sessionId: SUBAGENT_SID }), "subagentSession");
+  assert.equal(writeFilterReason({ text: "正常一句话", sessionId: USER_SID }), "");
+  assert.equal(writeFilterReason({ text: "我昨天看到 system-reminder 这个词" }), "", "不在开头就不是系统块");
+  assert.equal(writeFilterReason({ text: "" }), "");
+  assert.equal(writeFilterReason({ text: TOOLS_LINE, filter: false }), "", "关掉过滤器就放行");
+  assert.equal(writeFilterReason({ text: "正常一句话", sessionId: SUBAGENT_SID, skipSubagentSessions: false }), "");
+});
+
+test("过滤器 ①：system-reminder 整块不落库，反例会落库", (t) => {
+  const { ctx, runtime } = boot(t, {});
+  const listener = sessionListener(ctx);
+  emitTurn(listener, USER_SID, 1, TOOLS_LINE);
+  assert.equal(runtime.store.all().length, 0);
+  assert.equal(runtime.ingest.stats().filteredBy.reminder, 1);
+  emitTurn(listener, USER_SID, 3, "我昨天看到 system-reminder 这个词，挺好玩的");
+  const all = runtime.store.all();
+  assert.equal(all.length, 1, "普通用户消息里出现该词必须保留");
+  assert.ok(all[0].text.includes("挺好玩的"));
+});
+
+test("过滤器 ②：子代理回报两种开头都不落库", (t) => {
+  const { ctx, runtime } = boot(t, {});
+  const listener = sessionListener(ctx);
+  emitTurn(listener, USER_SID, 1, "Agent db793fe6-1a2b sent a message: 任务完成了");
+  emitTurn(listener, USER_SID, 3, "Background subagent db793fe6-1a2b finished and will do no further work");
+  assert.equal(runtime.store.all().length, 0);
+  assert.equal(runtime.ingest.stats().filteredBy.subagentReport, 2);
+});
+
+test("过滤器 ③：[Working Context 开头不落库", (t) => {
+  const { ctx, runtime } = boot(t, {});
+  const listener = sessionListener(ctx);
+  emitTurn(listener, USER_SID, 1, "[Working Context: in progress: 写代码 | plan mode: on]");
+  assert.equal(runtime.store.all().length, 0);
+  assert.equal(runtime.ingest.stats().filteredBy.workingContext, 1);
+});
+
+test("过滤器 ④：工具清单样板（句中命中）不落库", (t) => {
+  const { ctx, runtime } = boot(t, {});
+  const listener = sessionListener(ctx);
+  emitTurn(listener, USER_SID, 1, "随便一句 The following tools are available in this session 后面还有字");
+  assert.equal(runtime.store.all().length, 0);
+  assert.equal(runtime.ingest.stats().filteredBy.toolsBoilerplate, 1);
+});
+
+test("过滤器 ⑤：裸 UUID 会话整段不写，session-<uuid> 照常写", (t) => {
+  const { ctx, runtime } = boot(t, {});
+  const listener = sessionListener(ctx);
+  emitTurn(listener, SUBAGENT_SID, 1, "子代理会话里说的一句话");
+  assert.equal(runtime.store.all().length, 0, "子代理会话不许落库");
+  assert.equal(runtime.ingest.stats().filteredBy.subagentSession, 1);
+  emitTurn(listener, USER_SID, 1, "用户自己的会话照常写");
+  assert.equal(runtime.store.all().length, 1);
+});
+
+test("过滤器 ⑥：我们自己的注入不回灌，并计入 ownInjected", (t) => {
+  const { ctx, runtime } = boot(t, {});
+  const listener = sessionListener(ctx);
+  listener({ id: USER_SID }, { type: "user/message", seq: 1, data: { content: [{ type: "text", text: "[记忆] 上面第一句" }], source: { kind: "dsh-mnemos" } } });
+  listener({ id: USER_SID }, { type: "turn/end", seq: 2 });
+  assert.equal(runtime.store.all().length, 0);
+  assert.equal(runtime.ingest.stats().filteredBy.ownInjected, 1);
+});
+
+test("过滤器 ⑦：ingest.filter=false 时模板照写（排障模式）", (t) => {
+  const { ctx, runtime } = boot(t, { ingest: { filter: false } });
+  const listener = sessionListener(ctx);
+  emitTurn(listener, USER_SID, 1, "<system-reminder> x </system-reminder>");
+  emitTurn(listener, USER_SID, 3, "[Working Context: y]");
+  assert.equal(runtime.store.all().length, 2, "关掉过滤器就该原样写进去");
+  assert.equal(runtime.ingest.stats().filtered, 0);
+});
+
+test("过滤器 ⑧：ingest.skipSubagentSessions=false 时子代理会话照写", (t) => {
+  const { ctx, runtime } = boot(t, { ingest: { skipSubagentSessions: false } });
+  const listener = sessionListener(ctx);
+  emitTurn(listener, SUBAGENT_SID, 1, "关掉会话级拦截后照写");
+  assert.equal(runtime.store.all().length, 1);
+  assert.equal(runtime.ingest.stats().filteredBy.subagentSession, 0);
+});
+
+test("过滤器 ⑨：分桶累计与总数", (t) => {
+  const { ctx, runtime } = boot(t, {});
+  const listener = sessionListener(ctx);
+  emitTurn(listener, USER_SID, 1, "<system-reminder> a </system-reminder>");
+  emitTurn(listener, USER_SID, 3, "Agent db793fe6-1a2b sent a message: ok");
+  emitTurn(listener, USER_SID, 5, "[Working Context: b]");
+  emitTurn(listener, USER_SID, 7, "x The following tools are available in this session y");
+  emitTurn(listener, SUBAGENT_SID, 1, "子代理一句话");
+  const stats = runtime.ingest.stats();
+  assert.deepEqual(stats.filteredBy, { reminder: 1, subagentReport: 1, workingContext: 1, toolsBoilerplate: 1, subagentSession: 1, ownInjected: 0 });
+  assert.equal(stats.filtered, 5);
+  assert.equal(runtime.store.all().length, 0);
+});
+
+test("过滤器 ⑩：正常用户消息不受影响", (t) => {
+  const { ctx, runtime } = boot(t, {});
+  const listener = sessionListener(ctx);
+  emitTurn(listener, USER_SID, 1, "今天面试挂了，有点沮丧");
+  emitTurn(listener, USER_SID, 3, "上周在杭州的咖啡店她说想学胶片摄影");
+  assert.equal(runtime.store.all().length, 2);
+  assert.equal(runtime.ingest.stats().filtered, 0);
+});
+
+test("过滤器 ⑪：只关 filter 时，会话级拦截仍然生效", (t) => {
+  const { ctx, runtime } = boot(t, { ingest: { filter: false } });
+  const listener = sessionListener(ctx);
+  emitTurn(listener, SUBAGENT_SID, 1, "子代理会话照样拦");
+  assert.equal(runtime.store.all().length, 0);
+  assert.equal(runtime.ingest.stats().filteredBy.subagentSession, 1);
+  emitTurn(listener, USER_SID, 1, "<system-reminder> 关掉 filter 就写 </system-reminder>");
+  assert.equal(runtime.store.all().length, 1);
+});
+
+test("过滤器 ⑫：会话 id 形态边界——短串/大写/带前缀都不算子代理", () => {
+  assert.equal(writeFilterReason({ text: "x", sessionId: "db793fe6-1a2b" }), "");
+  assert.equal(writeFilterReason({ text: "x", sessionId: "DB793FE6-1A2B-4C3D-8E9F-0123456789AB" }), "");
+  assert.equal(writeFilterReason({ text: "x", sessionId: "session-db793fe6-1a2b-4c3d" }), "");
+  assert.equal(writeFilterReason({ text: "x", sessionId: "db793fe6-1a2b-4c3d-8e9f-0123456789ab" }), "subagentSession");
+});
+/* ------------------------------------------------------ 写入过滤器（结束） */

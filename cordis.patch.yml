@@ -3,6 +3,10 @@
 - insert:
     - id: dsh-mnemos
       name: 'dsh-mnemos'
+      config:
+        # 用户要求：默认不记录（面板「记忆 · 开/关」仍可按会话临时打开）
+        ingest:
+          capture: false
       # 下面全部是**示例**，全部注释掉等于用默认值跑，不是关掉插件。
       # config:
       #   enabled: true              # 关掉只停记忆功能，不卸载插件
