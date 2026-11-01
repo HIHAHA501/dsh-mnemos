@@ -615,12 +615,18 @@ apply: {"registered":true,"id":"dsh-mnemos"} label: 记忆星图
 | 子代理回报 | 以 `Agent <id> sent a message` / `Background subagent <id> …` 开头 | `ingest.filter` |
 | 工作上下文 | 以 `[Working Context:` 开头 | `ingest.filter` |
 | 工具清单样板 | 正文含 `The following tools are available in this session` | `ingest.filter` |
+| 宿主环境块 | 以 `Current runtime context.` 开头**且**（含 `This snapshot supersedes` 或长度 > 400）；或以 `Time sampled (while )?preparing turn` 开头；或单独的 `Approval prompts are disabled in this session`（不带问号） | `ingest.filter` |
 | 子代理会话 | sessionId 是裸 UUID（你自己的会话是 `session-<uuid>`）→ 整段不记 | `ingest.skipSubagentSessions` |
 | 我们自己的注入 | 消息 `source.kind === 'dsh-mnemos'` | 恒开（避免自食其果） |
 
-被挡下的条数按桶计数，`/mem status` 有一行「已过滤：N 条（reminder 1 · subagentReport 2 …）」。两个开关都关掉时行为回到「什么都记」（排障用）。
+被挡下的条数按**七个桶**计数（`reminder` / `subagentReport` / `workingContext` / `toolsBoilerplate` / `hostContext` / `subagentSession` / `ownInjected`），`/mem status` 有一行「已过滤：N 条（reminder 1 · hostContext 2 …）」。两个开关都关掉时行为回到「什么都记」（排障用）。
 
-**一个刻意的取舍**：工具清单那条是「包含即拒」。如果你自己把一段工具清单粘进对话，它不会被记住——宁可漏记一条，也不要把系统样板当成记忆。反例（不该误杀）：正文里只是**提到** `system-reminder` 这个词、但不在开头，照常记录。
+**两个刻意的取舍**：
+
+1. **工具清单那条是「包含即拒」**——你自己粘一段工具清单进对话，它不会被记住；宁可漏记一条，也不把系统样板当记忆。
+2. **宿主环境块是「前缀 + 特征」双条件**——只以 `Current runtime context.` 开头还不够，必须同时含 `This snapshot supersedes` 或超过 400 字才挡。这样你自己问「Current runtime context 是什么意思？」会照常记录。
+
+反例（不该误杀）：正文里只是**提到** `system-reminder` 这个词、但不在开头 → 照常记录。
 ### 写入通道的安全门槛
 
 面板不再只读，所以宿主侧收紧了入口。写入请求必须**同时**满足五条，缺一条直接拒绝且**不碰存储**：

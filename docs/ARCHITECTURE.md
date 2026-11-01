@@ -160,7 +160,7 @@ store.all() 里未合并的记录
 | 文件 | 导出的公共面 | 职责 |
 | --- | --- | --- |
 | `index.mjs` 581 行 | `name` `SECTION_NAME` `SECTION_ORDER` `PANEL_PATH` `mount` `createPanelHandler` `apply` | 读配置 → 开库 → 建索引 → 挂 7 个宿主面 → 卸载时 flush + close |
-| `src/host/ingest.mjs` | `BATCH_LIMIT` `extractMeta` `messageText` `ingestKey` `recordIdFor` `writeFilterReason` `createIngest` | 会话事件 → 记录：**写入过滤**（六桶：reminder / subagentReport / workingContext / toolsBoilerplate / subagentSession / ownInjected）、规则抽取、幂等键、攒批 flush、满 `ingest.everyTurns` 轮跑一次合并 |
+| `src/host/ingest.mjs` | `BATCH_LIMIT` `extractMeta` `messageText` `ingestKey` `recordIdFor` `writeFilterReason` `createIngest` | 会话事件 → 记录：**写入过滤**（七桶：reminder / subagentReport / workingContext / toolsBoilerplate / hostContext / subagentSession / ownInjected）、规则抽取、幂等键、攒批 flush、满 `ingest.everyTurns` 轮跑一次合并 |
 | `src/host/inject.mjs` 452 行 | `INJECT_CHAR_CAP` `INSTRUCTION` `createRetrievalIndex` `rankRecords` `renderInjection` `createLedger` `latestUserText` `sessionEvents` | 检索索引 + 每轮装配 + 双预算渲染 + 面板用的计账簿 |
 | `src/host/proactive.mjs` 92 行 | `STATES` `HINT_CHAR_CAP` `hasRecallConstraint` `decide` `renderReference` `renderHint` | 主动召回三态（`quote` / `ask` / `silence`）判定与提示渲染 |
 | `src/host/commands.mjs` 162 行 | `COMMAND_NAME`（`mem`）`USAGE` `createMemCommand` | `/mem status\|budget\|search\|forget\|pin` |
