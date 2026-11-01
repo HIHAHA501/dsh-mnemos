@@ -133,6 +133,10 @@ const actionsDemo = {
   capture: { status: "ready", sessionId: "demo-session", enabled: true, default: true, note: "" },
 };
 const realWidth = { html: serialize(renderBlocks(buildViewModel(normalPayload), hStub, null, { tab: "overview", actions: actionsDemo })) };
+// 同一份 HTML 放两个主题上下文：深色用 :root 变量，浅色用 .lightTheme 覆盖
+const duo = (html) =>
+  '<div class="duo"><div><p class="themeTag">深色主题</p><div class="surface">' + html + "</div></div>" +
+  '<div><p class="themeTag">浅色主题</p><div class="surface light"><div class="lightTheme">' + html + "</div></div></div></div>";
 
 // 输入区胶囊三态 + 一个 composer 尺寸的 mock 条
 const pillOf = (state) => serialize(api.__test.renderCapturePill(state, null, hStub));
@@ -187,6 +191,11 @@ const page = [
   "<title>dsh-mnemos 记忆面板 · 外观预览</title>",
   "<style>",
   ":root{color-scheme:dark}",
+  ":root{--dsw-alias-label-primary:#F4EDFB;--dsw-alias-label-secondary:#D3C8E6;--dsw-alias-label-tertiary:#A79BBB;--dsw-alias-label-caption:#8F87A0;--dsw-alias-border-l1:hsla(320,55%,80%,0.20);--dsw-alias-border-l2:rgba(255,255,255,0.075);--dsw-alias-bg-base:#14101c;--dsw-alias-bg-module-platform:rgba(255,255,255,0.042);--dsw-alias-interactive-bg-hover:rgba(255,255,255,0.075);--dsw-alias-state-error-primary:hsl(6,72%,72%);--dsw-alias-state-warn-primary:hsl(38,64%,72%);--dsw-alias-state-business-primary:hsl(158,46%,70%)}",
+  ".lightTheme{--dsw-alias-label-primary:#1F1B26;--dsw-alias-label-secondary:#4A4356;--dsw-alias-label-tertiary:#6B6379;--dsw-alias-label-caption:#8A8296;--dsw-alias-border-l1:rgba(20,16,32,0.14);--dsw-alias-border-l2:rgba(20,16,32,0.08);--dsw-alias-bg-base:#FFFFFF;--dsw-alias-bg-module-platform:rgba(20,16,32,0.035);--dsw-alias-interactive-bg-hover:rgba(20,16,32,0.06);--dsw-alias-state-error-primary:#C0392B;--dsw-alias-state-warn-primary:#B7791F;--dsw-alias-state-business-primary:#2F7DE1}",
+  ".duo{display:grid;grid-template-columns:1fr 1fr;gap:12px;align-items:start}",
+  ".surface.light{background:#FFFFFF;border-color:rgba(20,16,32,0.10)}",
+  ".themeTag{font-size:11px;color:#8F87A0;margin:0 0 6px}",
   "*{box-sizing:border-box}",
   "body{margin:0;padding:32px 28px 48px;background:#14101c;color:#C9BFDB;font:14px/1.6 -apple-system,'PingFang SC','Helvetica Neue',sans-serif}",
   ".wrap{max-width:1120px;margin:0 auto;display:flex;flex-direction:column;gap:28px}",
@@ -213,17 +222,17 @@ const page = [
   '<section class="case real" id="real560">',
   "<h2>① 真实宽度 560px（DSH 设置页里的实际宽度）</h2>",
   '<p class="cap">这块容器就是 560px；面板本体 max-width 也是 560。评审以此为准。</p>',
-  '<div class="surface" style="width:560px;max-width:100%">' + realWidth.html + "</div>",
+  '<div style="width:560px;max-width:100%">' + duo(realWidth.html) + "</div>",
   "</section>",
   '<section class="case real" id="about560">',
   "<h2>② 说明页（560px）</h2>",
   '<p class="cap">点顶部「说明」看到的就是这一屏：纯本地切页，不发请求、不写数据。</p>',
-  '<div class="surface" style="width:560px;max-width:100%">' + aboutWidth.html + "</div>",
+  '<div style="width:560px;max-width:100%">' + duo(aboutWidth.html) + "</div>",
   "</section>",
   '<section class="case real" id="pills">',
   "<h2>③ 输入区胶囊（开 / 关 / 未知 / 失败）</h2>",
   '<p class="cap">真身挂在 conversation.composer.dock：22px 高，与旁边的小胶囊同档；点击发 POST { action: "capture" }。</p>',
-  pillsHtml,
+  duo(pillsHtml),
   "</section>",
   '<h2 class="sub">④ 对照：三态（1280 宽网格，仅看结构差异）</h2>',
   '<div class="cases">',

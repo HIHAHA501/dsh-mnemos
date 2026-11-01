@@ -150,7 +150,7 @@ test("apply 通过 ctx.get('slots') 注册 settings.section", () => {
   const result = exports.apply({ get: (n) => (n === "slots" ? slots : undefined) });
   assert.equal(result.registered, true);
   const names = calls.map((c) => c.name).sort();
-  assert.deepEqual(names, ["conversation.composer.dock", "settings.section"], "两个槽位都要注册");
+  assert.deepEqual(names, ["conversation.composer.dock", "conversation.hero.options", "settings.section"], "三个槽位都要注册");
   const registered = calls.filter((c) => c.name === "settings.section")[0].fn();
   assert.equal(registered.definition.name, "settings.section");
   assert.equal(registered.definition.id, PLUGIN_NAME);
@@ -165,7 +165,7 @@ test("apply 也支持 ctx.slots 直接挂载（dsh-orb 那种写法）", () => {
   const { slots, calls } = fakeSlots();
   const result = exports.apply({ get: () => undefined, slots });
   assert.equal(result.registered, true);
-  assert.deepEqual(calls.map((c) => c.name).sort(), ["conversation.composer.dock", "settings.section"]);
+  assert.deepEqual(calls.map((c) => c.name).sort(), ["conversation.composer.dock", "conversation.hero.options", "settings.section"]);
 });
 
 /* ------------------------------------------------------------ 五块渲染 */
@@ -539,10 +539,12 @@ async function mountPanel(reply) {
     frame = "panel";
     return componentOf(captured, "settings.section").component();
   };
-  const renderPill = () => {
+  // surface: dock / hero —— 两个真实实例，各自一份 hooks 状态，只靠广播同步
+  const renderPill = (surface) => {
+    const which = surface === "hero" ? "hero" : "dock";
     index = 0;
-    frame = "pill";
-    return componentOf(captured, "conversation.composer.dock").component();
+    frame = "pill-" + which;
+    return componentOf(captured, which === "hero" ? "conversation.hero.options" : "conversation.composer.dock").component();
   };
   render();
   await tick();
@@ -785,6 +787,45 @@ test("会话开关：视图模型透出 capture 三字段", () => {
   const blank = exports.__test.buildViewModel({});
   assert.equal(blank.capture.sessionId, null);
   assert.equal(blank.capture.enabled, true, "缺省按开启");
+});
+
+/* ------------------------------------------------------- 首屏 hero + 主题 */
+
+test("胶囊在 hero 与 dock 两处渲染同一组件，且共享同一份状态", async () => {
+  const { calls, renderPill } = await mountPanel(captureReply(true));
+  const captured = calls;
+  void captured;
+  const dockTree = renderPill("dock");
+  const heroTree = renderPill("hero");
+  assert.ok(texts(dockTree).includes("记忆 · 开"));
+  assert.ok(texts(heroTree).includes("记忆 · 开"), "hero 首屏也要有同一枚胶囊");
+  // 点 hero 那枚，dock 那枚跟着变（同一份 actionStore + 广播）
+  findAll(heroTree, (n) => n.tag === "button")[0].props.onClick();
+  await tick();
+  await tick();
+  assert.ok(texts(renderPill("dock")).includes("记忆 · 关"), "一处点击，另一处同步：" + texts(renderPill("dock")));
+});
+
+test("主题：文字/边框/底色走宿主 token，深色值兜底", () => {
+  const { exports } = loadClient();
+  const colors = exports.__test.COLORS;
+  assert.ok(String(colors.text1).startsWith("var(--dsw-alias-label-primary,"), colors.text1);
+  assert.ok(String(colors.text2).startsWith("var(--dsw-alias-label-secondary,"), colors.text2);
+  assert.ok(String(colors.dim).startsWith("var(--dsw-alias-label-caption,"), colors.dim);
+  assert.ok(String(colors.line).startsWith("var(--dsw-alias-border-l1,"), colors.line);
+  assert.ok(String(colors.cardBg).startsWith("var(--dsw-alias-bg-module-platform,"), colors.cardBg);
+  assert.ok(String(colors.track).startsWith("var(--dsw-alias-interactive-bg-hover,"), colors.track);
+  // 粉紫是身份，不动
+  assert.equal(colors.pink, "hsl(320, 66%, 74%)");
+});
+
+test("主题：按钮文字跟着 label 变量走，不会白底白字", () => {
+  const { exports } = loadClient();
+  const view = exports.__test.buildViewModel({ stats: { count: 1 }, budget: {}, vector: { state: "on" } });
+  const tree = exports.__test.renderBlocks(view, makeReactWith().react.createElement, null, { tab: "overview" });
+  const search = findAll(tree, (n) => n.tag === "button" && texts(n).trim() === "搜索")[0];
+  assert.ok(search, "操作卡要有搜索按钮");
+  assert.ok(String(search.props.style.color).includes("var(--dsw-alias-label-primary"), "按钮文字必须是 label 变量：" + String(search.props.style.color));
 });
 
 /* ------------------------------------------------------------- 源码形态 */

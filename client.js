@@ -86,20 +86,22 @@ function hash32(text) {
  *   text1 15.7 / 14.1   text2 10.4 / 9.3   text3 6.3 / 5.7   dim 5.1 / 4.6
  */
 const C = {
-  text1: "#F4EDFB",
-  text2: "#D3C8E6",
-  text3: "#A79BBB",
-  dim: "#8F87A0",
+  // 宿主的设计 token 优先，深色值兜底：浅色主题下不再白底白字
+  text1: "var(--dsw-alias-label-primary, #F4EDFB)",
+  text2: "var(--dsw-alias-label-secondary, #D3C8E6)",
+  text3: "var(--dsw-alias-label-tertiary, #A79BBB)",
+  dim: "var(--dsw-alias-label-caption, #8F87A0)",
+  line: "var(--dsw-alias-border-l1, hsla(320, 55%, 80%, 0.20))",
+  lineSoft: "var(--dsw-alias-border-l2, rgba(255,255,255,0.075))",
+  cardBg: "var(--dsw-alias-bg-module-platform, rgba(255,255,255,0.042))",
+  track: "var(--dsw-alias-interactive-bg-hover, rgba(255,255,255,0.075))",
+  // 粉紫是身份，保留；状态色跟宿主走
   pink: "hsl(320, 66%, 74%)",
   purple: "hsl(265, 62%, 73%)",
-  green: "hsl(158, 46%, 70%)",
-  amber: "hsl(38, 64%, 72%)",
-  line: "hsla(320, 55%, 80%, 0.20)",
-  lineSoft: "rgba(255,255,255,0.075)",
-  cardBg: "rgba(255,255,255,0.042)",
-  cardBgTop: "rgba(255,255,255,0.062)",
+  green: "var(--dsw-alias-state-business-primary, hsl(158, 46%, 70%))",
+  amber: "var(--dsw-alias-state-warn-primary, hsl(38, 64%, 72%))",
+  danger: "var(--dsw-alias-state-error-primary, hsl(6, 72%, 72%))",
   glow: "inset 0 1px 0 rgba(255,255,255,0.075)",
-  track: "rgba(255,255,255,0.075)",
 };
 
 function pinkPurple(t) {
@@ -150,7 +152,7 @@ const S = {
     background:
       "radial-gradient(120% 130% at 100% 0%, hsla(320, 65%, 70%, 0.22), hsla(320, 65%, 70%, 0) 55%)," +
       "radial-gradient(120% 140% at 0% 100%, hsla(265, 65%, 68%, 0.22), hsla(265, 65%, 68%, 0) 58%)," +
-      "linear-gradient(160deg, rgba(58,44,76,0.55), rgba(35,29,48,0.72))",
+      "var(--dsw-alias-bg-module-platform, rgba(58,44,76,0.55))",
     display: "flex",
     flexDirection: "column",
     gap: 12,
@@ -165,7 +167,7 @@ const S = {
   card: {
     borderRadius: 16,
     border: "1px solid " + C.line,
-    background: "linear-gradient(155deg, " + C.cardBgTop + ", " + C.cardBg + ")",
+    background: C.cardBg,
     boxShadow: C.glow,
     padding: "13px 15px 14px",
     display: "flex",
@@ -174,8 +176,8 @@ const S = {
   },
   cardLight: {
     borderRadius: 14,
-    border: "1px solid rgba(255,255,255,0.06)",
-    background: "rgba(255,255,255,0.028)",
+    border: "1px solid " + C.lineSoft,
+    background: C.cardBg,
     padding: "12px 14px 13px",
     display: "flex",
     flexDirection: "column",
@@ -221,7 +223,7 @@ const S = {
     position: "relative",
     borderRadius: 20,
     border: "1px solid hsla(38, 60%, 74%, 0.30)",
-    background: "linear-gradient(155deg, hsla(38, 60%, 70%, 0.10), rgba(255,255,255,0.03))",
+    background: C.cardBg,
     boxShadow: C.glow,
     padding: "18px 18px 16px",
     display: "flex",
@@ -230,15 +232,16 @@ const S = {
   },
 };
 
-S.trackZero = Object.assign({}, S.track, { background: "rgba(255,255,255,0.028)" });
+// 0 值轨道压暗一档：中性灰在两个主题下都成立（不用白/黑，避免一边看不见）
+S.trackZero = Object.assign({}, S.track, { background: "rgba(127,127,127,0.10)" });
 S.segGroup = {
   display: "inline-flex",
   alignSelf: "flex-start",
   gap: 3,
   padding: 3,
   borderRadius: 999,
-  background: "rgba(255,255,255,0.05)",
-  border: "1px solid rgba(255,255,255,0.07)",
+  background: C.track,
+  border: "1px solid " + C.lineSoft,
 };
 S.segOn = {
   padding: "4px 15px",
@@ -271,8 +274,8 @@ S.input = {
   minWidth: 0,
   padding: "6px 10px",
   borderRadius: 10,
-  border: "1px solid rgba(255,255,255,0.10)",
-  background: "rgba(255,255,255,0.05)",
+  border: "1px solid " + C.line,
+  background: C.track,
   color: C.text1,
   fontSize: 12.5,
   fontFamily: "inherit",
@@ -293,8 +296,8 @@ S.btn = {
 S.miniBtn = {
   padding: "3px 10px",
   borderRadius: 8,
-  border: "1px solid rgba(255,255,255,0.12)",
-  background: "rgba(255,255,255,0.04)",
+  border: "1px solid " + C.line,
+  background: C.track,
   color: C.text2,
   fontSize: 11.5,
   cursor: "pointer",
@@ -310,8 +313,8 @@ S.dangerBtn = Object.assign({}, S.miniBtn, {
 S.miniSelect = {
   padding: "3px 6px",
   borderRadius: 8,
-  border: "1px solid rgba(255,255,255,0.12)",
-  background: "rgba(255,255,255,0.04)",
+  border: "1px solid " + C.line,
+  background: C.track,
   color: C.text2,
   fontSize: 11.5,
   fontFamily: "inherit",
@@ -340,7 +343,7 @@ S.pill = {
   padding: "0 10px",
   borderRadius: 999,
   border: "1px solid hsla(320, 50%, 82%, 0.22)",
-  background: "rgba(255,255,255,0.05)",
+  background: C.track,
   color: C.text2,
   fontSize: 11.5,
   lineHeight: 1,
@@ -350,7 +353,7 @@ S.pill = {
 };
 S.pillDot = { width: 6, height: 6, borderRadius: 999, flex: "none" };
 S.captureRow = { display: "flex", alignItems: "center", gap: 10, paddingBottom: 2 };
-S.actErr = { fontSize: 11, color: "hsl(6, 72%, 76%)", paddingLeft: 38 };
+S.actErr = { fontSize: 11, color: C.danger, paddingLeft: 38 };
 
 function fillBar(pct, tone) {
   const k = tone === undefined ? 0.15 : tone;
@@ -640,7 +643,7 @@ function memoryRing(memory, h) {
         h("stop", { key: "b", offset: "1", stopColor: "hsl(265, 64%, 76%)" }),
       ]),
     ]),
-    h("circle", { key: "track", cx: 33, cy: 33, r: R, fill: "none", stroke: "rgba(255,255,255,0.09)", strokeWidth: 5 }),
+    h("circle", { key: "track", cx: 33, cy: 33, r: R, fill: "none", stroke: "rgba(127,127,127,0.28)", strokeWidth: 5 }),
     h("circle", {
       key: "glow",
       cx: 33,
@@ -722,15 +725,15 @@ async function postAction(payload, fetchImpl) {
 /* ----------------------------------------------------------- 会话级开关 */
 const CAPTURE_TEXT = { on: "记忆 · 开", off: "记忆 · 关", unknown: "记忆 …", failed: "记忆 · 失败" };
 
-const captureSubscribers = new Map();
-function subscribeCapture(key, fn) {
-  if (typeof key === "string" && typeof fn === "function") captureSubscribers.set(key, fn);
+const captureSubscribers = new Set();
+function subscribeCapture(fn) {
+  if (typeof fn === "function") captureSubscribers.add(fn);
 }
-function unsubscribeCapture(key) {
-  captureSubscribers.delete(key);
+function unsubscribeCapture(fn) {
+  captureSubscribers.delete(fn);
 }
 function emitCapture(snapshot) {
-  for (const fn of captureSubscribers.values()) {
+  for (const fn of Array.from(captureSubscribers)) {
     try {
       fn(snapshot);
     } catch {
@@ -1056,7 +1059,7 @@ function vectorCard(view, h) {
   const vector = asObject(view.vector);
   const color = vectorColor(String(vector.state));
   const tint =
-    vector.state === "on" ? "hsla(158, 46%, 70%, 0.14)" : vector.state === "off" ? "rgba(255,255,255,0.05)" : "hsla(38, 64%, 72%, 0.13)";
+    vector.state === "on" ? "hsla(158, 46%, 70%, 0.14)" : vector.state === "off" ? "rgba(127,127,127,0.12)" : "hsla(38, 64%, 72%, 0.13)";
   return h("section", { key: "vector", style: S.cardLight }, [
     headRow(h, "vector", "向量通道"),
     h("div", { key: "chip", style: { display: "inline-flex", alignSelf: "flex-start", alignItems: "center", gap: 7, padding: "3px 11px", borderRadius: 999, background: tint, border: "1px solid " + color + "55" } }, [
@@ -1427,10 +1430,9 @@ function register(ctx, React) {
     if (hooks && typeof hooks.useEffect === "function") {
       // 订阅会话开关：另一处（输入区胶囊）改了，这里要跟着走
       hooks.useEffect(() => {
-        subscribeCapture("panel", (capture) => {
-          setActions((prev) => Object.assign({}, prev, { capture }));
-        });
-        return () => unsubscribeCapture("panel");
+        const onCapture = (capture) => setActions((prev) => Object.assign({}, prev, { capture }));
+        subscribeCapture(onCapture);
+        return () => unsubscribeCapture(onCapture);
       }, []);
       hooks.useEffect(() => {
         if (tab !== "overview") return undefined;
@@ -1485,8 +1487,8 @@ function register(ctx, React) {
     const setState = st[1];
     if (hooks && typeof hooks.useEffect === "function") {
       hooks.useEffect(() => {
-        subscribeCapture("pill", setState);
-        return () => unsubscribeCapture("pill");
+        subscribeCapture(setState);
+        return () => unsubscribeCapture(setState);
       }, []);
       hooks.useEffect(() => {
         // 挂载时取一次 GET：拿到 capture.sessionId 与当前开关
@@ -1512,6 +1514,10 @@ function register(ctx, React) {
     return renderCapturePill(view, () => actionHandlers(setState).onCaptureToggle(), h);
   }
 
+  // 同一个组件挂两处：首屏 hero 与会话内 composer dock；两处共用 actionStore.capture
+  slots.inject("conversation.hero.options", () =>
+    slots.register({ name: "conversation.hero.options", id: "dsh-mnemos-capture-hero", order: 0 }, CapturePill),
+  );
   slots.inject("conversation.composer.dock", () =>
     slots.register({ name: "conversation.composer.dock", id: "dsh-mnemos-capture", order: 0 }, CapturePill),
   );
