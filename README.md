@@ -216,11 +216,12 @@ rm -rf ~/.dsh/profiles/desktop/dsh-mnemos
 persona:
   mode: external        # self（默认）| external
   kind: http            # none（默认）| file | http
-  url: "http://127.0.0.1:<对方端口>/api/dsh-persona-dafeiyu/persona"   # kind=http
+  url: "http://127.0.0.1:<对方端口>/api/persona"   # kind=http；也可以写相对路径 "/api/…"（端口随机会变，见下）
+  adapter: text         # text（默认，一次 GET 当纯文本）| dafeiyu（两步取）
   path: ""              # kind=file 时填人格文件路径
   timeoutMs: 2000       # 钳 200..10000
   maxChars: 4000        # 钳 200..20000
-  refresh: startup      # startup（默认）| turn
+  refresh: startup      # startup（默认，只在启动时读）| turn（每轮检查，≥60 秒才真读）
 ```
 
 **`kind: http` 只接受本机地址**（`127.0.0.1` / `localhost` / `[::1]`）。`0.0.0.0`、`127.0.0.2`、云元数据地址 `169.254.169.254`、`https://` 一律拒绝，**而且拒绝时不发请求**——这条是硬安全线，不是建议。
@@ -235,7 +236,7 @@ persona:
   kind: http
   url: /api/dsh-persona-dafeiyu   # 相对路径：端口每次启动都是随机的
   adapter: dafeiyu      # 两步取：/status 拿当前 id → /persona?id= 拿正文
-  refresh: startup
+  refresh: turn         # 在 dafeiyu 里换人设后 60 秒内自动同步，不用重启
 ```
 
 **为什么 url 必须是相对路径**：DSH 每次启动绑的是 OS 随机端口（本机实测走过 52603 → 50870 → 51163），写死端口的配置下一次启动就失效。相对路径由宿主自己的 `webServer.origin` 在运行时拼成绝对地址；拿不到 origin 时只写一条 note、不会报错。
@@ -278,7 +279,7 @@ persona:
   capture.json           记忆开关（{version:3,default,sessions}；全局默认 + 每会话覆盖）
 ```
 
-- 备份：`cp -R <dataDir> <别处>` 即可，四个文件是一致的一套（`capture.json` 丢了只会让开关回到默认「开」）。
+- 备份：`cp -R <dataDir> <别处>` 即可，四个文件是一致的一套（`capture.json` 丢了只会让开关回到 `ingest.capture` 的默认值——本机配置是 **关**，会话覆盖也会一起丢）。
 - 重置：删掉整个 `<dataDir>`，下次启动会重建。
 - 手工看一下库里有什么（把 `/tmp/mnemos-demo` 换成你的 dataDir）：
 
