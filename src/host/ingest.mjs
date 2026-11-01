@@ -31,6 +31,7 @@ export const FILTER_BUCKETS = Object.freeze([
   "subagentReport",
   "workingContext",
   "toolsBoilerplate",
+  "hostContext",
   "subagentSession",
   "ownInjected",
 ]);
@@ -41,6 +42,31 @@ const SUBAGENT_SESSION = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-/;
 const SUBAGENT_REPORT = /^(Agent [0-9a-f-]{8,} sent a message|Background subagent [0-9a-f-]{8,} (finished|sent))/;
 // 这句只出现在工具清单里，出现即整条是系统样板
 const TOOLS_BOILERPLATE = "The following tools are available in this session";
+
+// 宿主每轮塞进上下文的环境说明：它们以 user 消息进执行面，但不是人说的话
+const HOST_CONTEXT_PREFIX = "Current runtime context.";
+const HOST_CONTEXT_MARKER = "This snapshot supersedes";
+const TIME_SAMPLED = /^Time sampled (while )?preparing turn/;
+const APPROVAL_NOTE_PREFIX = "Approval prompts are disabled in this session";
+/** 长到不像提问的门槛：超过它就是整块环境说明，而不是「这句是什么意思」 */
+const HOST_CONTEXT_LONG = 400;
+
+/**
+ * 判断一条消息是不是宿主塞进来的上下文块。
+ * 前缀只是必要条件：用户也可能以这几个词开头提问，所以再要求「带整块标记」或「长到不像提问」，
+ * 或者（审批提示那条）不是以问号结尾。
+ * @param {string} trimmed 已 trim 的正文。
+ * @returns {boolean} 是否属于宿主上下文。
+ */
+function looksLikeHostContext(trimmed) {
+  if (trimmed.indexOf(HOST_CONTEXT_PREFIX) === 0) {
+    if (trimmed.indexOf(HOST_CONTEXT_MARKER) >= 0) return true;
+    if (trimmed.length > HOST_CONTEXT_LONG) return true;
+  }
+  if (TIME_SAMPLED.test(trimmed)) return true;
+  if (trimmed.indexOf(APPROVAL_NOTE_PREFIX) === 0 && !/[?？]\s*$/.test(trimmed)) return true;
+  return false;
+}
 
 /**
  * 写不写这条消息：返回分桶名，返回空串表示放行。
@@ -60,6 +86,7 @@ export function writeFilterReason(input = {}) {
   if (SUBAGENT_REPORT.test(trimmed)) return "subagentReport";
   if (trimmed.startsWith("[Working Context:")) return "workingContext";
   if (trimmed.includes(TOOLS_BOILERPLATE)) return "toolsBoilerplate";
+  if (looksLikeHostContext(trimmed)) return "hostContext";
   return "";
 }
 

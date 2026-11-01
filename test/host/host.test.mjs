@@ -2110,7 +2110,7 @@ test("过滤器 ⑨：分桶累计与总数", (t) => {
   emitTurn(listener, USER_SID, 7, "x The following tools are available in this session y");
   emitTurn(listener, SUBAGENT_SID, 1, "子代理一句话");
   const stats = runtime.ingest.stats();
-  assert.deepEqual(stats.filteredBy, { reminder: 1, subagentReport: 1, workingContext: 1, toolsBoilerplate: 1, subagentSession: 1, ownInjected: 0 });
+  assert.deepEqual(stats.filteredBy, { reminder: 1, subagentReport: 1, workingContext: 1, toolsBoilerplate: 1, hostContext: 0, subagentSession: 1, ownInjected: 0 });
   assert.equal(stats.filtered, 5);
   assert.equal(runtime.store.all().length, 0);
 });
@@ -2139,6 +2139,71 @@ test("过滤器 ⑫：会话 id 形态边界——短串/大写/带前缀都不�
   assert.equal(writeFilterReason({ text: "x", sessionId: "DB793FE6-1A2B-4C3D-8E9F-0123456789AB" }), "");
   assert.equal(writeFilterReason({ text: "x", sessionId: "session-db793fe6-1a2b-4c3d" }), "");
   assert.equal(writeFilterReason({ text: "x", sessionId: "db793fe6-1a2b-4c3d-8e9f-0123456789ab" }), "subagentSession");
+});
+test("过滤器⑬：宿主 runtime-context 块（真实样本）不落库", (t) => {
+  const { ctx, runtime } = boot(t, {});
+  const listener = sessionListener(ctx);
+  const sample = "Current runtime context. This snapshot supersedes earlier runtime-context snapshots.\n\nCurrent working directory: \"/Users/tle/x\"";
+  emitTurn(listener, USER_SID, 1, sample);
+  assert.equal(runtime.store.all().length, 0);
+  assert.equal(runtime.ingest.stats().filteredBy.hostContext, 1);
+});
+
+test("过滤器⑭：Time sampled 采样行（真实样本）不落库", (t) => {
+  const { ctx, runtime } = boot(t, {});
+  const listener = sessionListener(ctx);
+  emitTurn(listener, USER_SID, 1, "Time sampled while preparing turn 1, step 1: 2026-11-01T03:41:02.114Z");
+  assert.equal(runtime.store.all().length, 0);
+  assert.equal(runtime.ingest.stats().filteredBy.hostContext, 1);
+});
+
+test("过滤器⑮：反例——用户提问以 Current runtime context 开头但很短、无整块标记 → 保留", (t) => {
+  const { ctx, runtime } = boot(t, {});
+  const listener = sessionListener(ctx);
+  emitTurn(listener, USER_SID, 1, "Current runtime context 是什么意思？");
+  const all = runtime.store.all();
+  assert.equal(all.length, 1, "这是用户的提问，不许误杀");
+  assert.ok(all[0].text.includes("是什么意思"));
+  assert.equal(runtime.ingest.stats().filteredBy.hostContext, 0);
+});
+
+test("过滤器⑯：以该前缀开头且超长（>400）→ 仍当作环境块挡掉", (t) => {
+  const { ctx, runtime } = boot(t, {});
+  const listener = sessionListener(ctx);
+  emitTurn(listener, USER_SID, 1, "Current runtime context. " + "很长的一段环境说明。".repeat(40));
+  assert.equal(runtime.store.all().length, 0);
+  assert.equal(runtime.ingest.stats().filteredBy.hostContext, 1);
+});
+
+test("过滤器⑰：短但带 This snapshot supersedes 标记 → 挡掉", (t) => {
+  const { ctx, runtime } = boot(t, {});
+  const listener = sessionListener(ctx);
+  emitTurn(listener, USER_SID, 1, "Current runtime context. This snapshot supersedes earlier ones.");
+  assert.equal(runtime.store.all().length, 0);
+  assert.equal(runtime.ingest.stats().filteredBy.hostContext, 1);
+});
+
+test("过滤器⑱：审批提示单独出现挡掉，带问号的提问保留", (t) => {
+  const { ctx, runtime } = boot(t, {});
+  const listener = sessionListener(ctx);
+  emitTurn(listener, USER_SID, 1, "Approval prompts are disabled in this session: actions that require approval are rejected automatically.");
+  assert.equal(runtime.store.all().length, 0);
+  emitTurn(listener, USER_SID, 3, "Approval prompts are disabled in this session 是什么意思？");
+  const all = runtime.store.all();
+  assert.equal(all.length, 1, "带问号的是用户提问");
+  assert.equal(runtime.ingest.stats().filteredBy.hostContext, 1);
+});
+
+test("过滤器⑲：两条真实样本各计一次，hostContext 累计为 2", (t) => {
+  const { ctx, runtime } = boot(t, {});
+  const listener = sessionListener(ctx);
+  emitTurn(listener, USER_SID, 1, "Current runtime context. This snapshot supersedes earlier runtime-context snapshots.");
+  emitTurn(listener, USER_SID, 3, "Time sampled while preparing turn 1, step 1: 2026-11-01T03:41:02.114Z");
+  emitTurn(listener, USER_SID, 5, "今天面试挂了，有点沮丧");
+  const stats = runtime.ingest.stats();
+  assert.equal(stats.filteredBy.hostContext, 2);
+  assert.equal(stats.filtered, 2);
+  assert.equal(runtime.store.all().length, 1);
 });
 /* ------------------------------------------------------ 写入过滤器（结束） */
 
