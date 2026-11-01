@@ -255,9 +255,10 @@ persona:
   records.jsonl          追加写的事件日志（一行一条 {"op":"put","r":{...}}）
   memory.snapshot.json   压缩后的全量快照
   store.lock             跨进程锁，30s 不刷新视为陈旧可抢占
+  capture.json           会话级记忆开关（{version:1,sessions:{[id]:{enabled,at}}}，最多 500 个会话）
 ```
 
-- 备份：`cp -R <dataDir> <别处>` 即可，三个文件是一致的一套。
+- 备份：`cp -R <dataDir> <别处>` 即可，四个文件是一致的一套（`capture.json` 丢了只会让开关回到默认「开」）。
 - 重置：删掉整个 `<dataDir>`，下次启动会重建。
 - 手工看一下库里有什么（把 `/tmp/mnemos-demo` 换成你的 dataDir）：
 
@@ -480,8 +481,10 @@ node scripts/preview-panel.mjs > /tmp/panel-preview.html   # 最前面是 560px 
 
 | 情况 | 响应 | 面板 |
 | --- | --- | --- |
-| 本机 GET | 200 + `{stats,budget,vector,recalls}` | 渲染五块 |
-| 非 GET | 405 + `allow: GET` | 「不可用 + 原因」 |
+| 本机 GET | 200 + `{stats,budget,vector,recalls,capture}` | 渲染五块 + 会话开关 |
+| 本机 POST（带 `x-dsh-mnemos: 1`） | 200 + `{ok,...}`：`search` / `pin` / `tier` / `forget` / `capture` | 行内显示结果 |
+| POST 缺头 / 非 JSON / 超 8KB / 未知 action | 400（超限 413）+ `{ok:false,code}` | 行内显示原因，列表不清空 |
+| 非 GET/POST | 405 + `allow: GET, POST` | 「不可用 + 原因」 |
 | 非本机访问（`remoteAddress` / `Host` 非 loopback） | 403 + 原因 | 「不可用 + 原因」 |
 | 库未就绪 / 已关闭 / 路由未挂载 | 503 + 原因 | 「不可用 + 原因」 |
 
@@ -540,10 +543,35 @@ apply: {"registered":true,"id":"dsh-mnemos"} label: 记忆星图
 | 钉住 / 取消钉住 | 结果行右侧按钮 | POST action=pin（id / pinned） |
 | 改层 | 结果行右侧下拉（热 / 冷 / 人格 / 状态） | POST action=tier（id / tier） |
 | 忘记 | 点「忘记」→ 变红「确认忘记？」→ 3 秒内再点一次 | POST action=forget（id） |
+| 本会话是否记录 | 「操作」卡顶部的「记忆 · 开 / 关」 | POST action=capture（enabled，可选 sessionId） |
 
 「忘记」是唯一不可撤销的动作，所以做了两步确认（不是 `window.confirm`——那是命令行思路）。
 动作失败会在行内显示原因、列表不清空；3 秒内没确认就自动退回，不会误删。
 
+### 这个会话要不要记（记忆 · 开 / 关）
+
+不是每段对话都值得进长期记忆——一次性问答、试玩、敏感话题都该能「漏过」。所以有一个**会话级开关**：位置有三处，状态只有一份。
+
+| 位置 | 什么时候可见 |
+| --- | --- |
+| 首屏「deepseek-harness ／ 标准模式」那一行 | 还没进会话时（hero 首屏） |
+| 输入框右侧的小胶囊 | 已经在会话里时 |
+| 设置 →「记忆星图」→「操作」卡顶部 | 任何时候 |
+
+点一下就在「记忆 · 开」与「记忆 · 关」之间切换；失败会变红点并在 2 秒后回退，不留半截状态。
+
+| 状态 | 含义 |
+| --- | --- |
+| 开（默认） | 这个会话的对话照常写成记忆 |
+| 关 | **从这一刻起**不再写入；**已有记忆一条都不删**，检索与注入照旧 |
+| 再打开 | 从那一刻起继续记 |
+
+**落盘与范围**：开关按会话 id 存在 `<dataDir>/capture.json`（原子写、最多 500 个会话，超出淘汰最旧的），重启后仍在。没设置过的会话用全局默认 `ingest.capture`（默认开）。
+
+**两个必须知道的行为**：
+
+1. **首屏与输入区是两个不同的宿主槽位**（`conversation.hero.options` 与 `conversation.composer.dock`）。宿主只在「已进会话且输入框非空」时渲染后者——这就是为什么在没有会话的首屏上，胶囊会出现在上面那一行、而不是输入框旁。
+2. **胶囊显示的会话以「点击那一刻」为准**：宿主没有暴露「会话切换」事件，所以你在胶囊可见期间切了会话但没点它，标签可能还是上一个会话的值；点一下会先拉最新状态再翻转，不会改错会话。
 ### 写入通道的安全门槛
 
 面板不再只读，所以宿主侧收紧了入口。写入请求必须**同时**满足五条，缺一条直接拒绝且**不碰存储**：

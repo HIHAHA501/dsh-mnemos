@@ -44,11 +44,12 @@
 | --- | --- | --- |
 | `config.mjs` | `MODES` `VECTOR_ENABLED` `VECTOR_PROVIDERS` `INGEST_LLM` `CONFIG_DEFAULTS` `defaultDataDir` `resolveConfig` | 唯一配置入口：宿主的原始 config 不可信，逐字段收敛到固定形状并 `deepFreeze`；不合法值回落到默认并写进 `options.warnings` |
 | `record.mjs` | `KINDS` `TIERS` `SUBJECTS` `recordError` `clamp` `createId` `normalizeRecord` `createRecord` `cloneRecord` `isMerged` `unionMeta` `normalizeMeta` `normalizeEmotion` | 记录形状的唯一真相：6 种 kind、4 种 tier、3 种 subject；id 形如 `<kind>-<timestamp36>-<6字符>` |
-| `store.mjs` | `StoreError` `createStore` | 持久化：JSONL 追加写 + 快照压缩 + 跨进程锁；返回 `{insert, upsert, get, all, recent, candidates, setPinned, forget, merge, stats, close}` |
+| `store.mjs` | `StoreError` `createStore` | 持久化：JSONL 追加写（`records.jsonl`）+ 快照压缩（`memory.snapshot.json`）+ 跨进程锁（`store.lock`）；返回 `{insert, upsert, get, all, recent, candidates, setPinned, forget, merge, stats, close}` |
 | `heat.mjs` | `heatOf` | 热度 = 时近性 0.45 + 提及次数 0.25 + 权重 0.3；半衰期 14 天；`persona`/`state`/`cold` 不随时间衰减。**冷层语义**：`cold` 的 recency 恒为 1（久远本身不再压低热度），但整体再乘 `coldWeight`（默认 0.75），所以同等条件下 `hot` 仍略占优 |
 | `emotion.mjs` | `estimateEmotion` | 中英词典 + 程度副词放大 → `{valence, arousal, cues}`；无命中时 `arousal` 取 0.3 中性基线 |
 | `consolidate.mjs` | `bigramSimilarity` `planMerge` | 相似记录归并**方案**：阈值 0.82、权重上限 0.75、每组最多 3 条；只产出 `{keep, drop, groups, patchById}`，不写库 |
 | `tiering.mjs` | `TIER_DEFAULTS` `applyTiering` `reviveOnMentionPatch` | `hot` → `cold` 的**惰性**降级：写入落库与插件启动时各扫一次（无后台定时器）；判据 = 记录是 `hot`、未 pinned、`tierSource !== "user"`、年龄 ≥ 30 天、且当前热度 < 0.35；冷层被再次提及（提及次数增加）时回升为 `hot`；启动时对存量记录按同一规则重算一次 `tier`（只改字段，不动正文） |
+| `capture.mjs` | `CAPTURE_FILE` `CAPTURE_MAX_SESSIONS` `createCaptureStore` | 会话级记忆开关的落盘：`{version:1,sessions:{[id]:{enabled,at}}}`，临时文件 + rename 原子写，最多 500 个会话（按 `at` 淘汰最旧），坏文件/超 200KB 按空表处理；只影响**新写入**，不删既有记录 |
 | `budget.mjs` | `tokenParts` `estimateTokens` `project` | token 估算（CJK 1 / 词 1 / 标点 0.3）与上下文裁剪：`persona`/`state` 无条件保留，其余按 `budget`/`topN` 贪心裁，产出 `{picks, tokens, dropped}` |
 
 检索层 `src/retrieval/`：
@@ -174,7 +175,7 @@ store.all() 里未合并的记录
 | `session/event` | `ctx.on('session/event', listener, {global:true})`；注册失败退化为非 global | `index.mjs:219-241` |
 | `commands.register` | `service.register(createMemCommand({store, config, index, ledger, ingest, notes, now}))` | `index.mjs:244-264` |
 | `tools.register` ×3 | 每个定义过 `guardTool`（execute 与 render 各自 try/catch），再逐个 `service.register` | `index.mjs:266-316` |
-| `webServer.register` | `{kind:'exact', path:'/.dsh-mnemos/panel', handler}` | `index.mjs:404-423` |
+| `webServer.register` | `{kind:'exact', path:'/.dsh-mnemos/panel', handler}`：GET 返回 `{stats,budget,vector,recalls,capture}`；POST 动作 `search / pin / tier / forget / capture`（五道门槛：POST + JSON + `x-dsh-mnemos: 1` + loopback + ≤8KB） | `index.mjs`（`createPanelHandler` / `panelWriteGate` / `panelAction`） |
 | `ctx.effect`（dispose） | `ctx.effect(() => () => cleanup(), 'dsh-mnemos.dispose')`，退化为 `ctx.on('dispose', cleanup)`；先撤注册、再 flush、最后 close | `index.mjs:426-463` |
 
 七个面统一走 `whenService`（`index.mjs:83-110`）：现在就绪 → 立刻接线并返回 `ready`；
@@ -300,6 +301,7 @@ $ ls index.mjs client.js src/*.mjs src/retrieval/*.mjs src/host/*.mjs
 client.js
 index.mjs
 src/budget.mjs
+src/capture.mjs
 src/config.mjs
 src/consolidate.mjs
 src/emotion.mjs
