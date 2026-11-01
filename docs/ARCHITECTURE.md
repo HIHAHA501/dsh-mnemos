@@ -312,6 +312,7 @@ src/host/inject.mjs
 src/host/proactive.mjs
 src/host/project.mjs
 src/host/tools.mjs
+src/persona-bridge.mjs
 src/record.mjs
 src/retrieval/bm25.mjs
 src/retrieval/hybrid.mjs
@@ -324,9 +325,9 @@ src/tiering.mjs
 
 （逐字复制这条命令的输出：`ls` 把所有参数一起按字母序排，所以 client.js 与 index.mjs 打头，`src/host/*` 出现在 `src/heat` 与 `src/record` 之间。）
 
-本文出现过的模块名：`config record store heat emotion consolidate budget tiering`、
+本文出现过的模块名：`config record store heat emotion consolidate budget tiering capture persona-bridge`、
 `tokenize bm25 metadata vector hybrid`、`ingest inject proactive commands tools project`，
-加 `index.mjs` 与 `client.js`——共 21 个，与上面 ls 的 21 个文件一一对应。
+加 `index.mjs` 与 `client.js`——共 23 个，与上面 ls 的 23 个文件一一对应。
 
 ## 11. 测试对应
 
