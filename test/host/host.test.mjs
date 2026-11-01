@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -1724,158 +1724,207 @@ test("面板⑥：GET 载荷仍是只读四键 + 会话开关 capture，且不�
   assert.equal(body.ok, undefined);
 });
 
-test("capture 存储：默认回退、set/get、remove", (t) => {
-  const store = createCaptureStore({ file: join(tempDir(t), CAPTURE_FILE), now: () => 1000 });
-  assert.equal(store.get("s1", true), true, "没覆盖时用全局默认");
-  assert.equal(store.get("s1", false), false);
-  const saved = store.set("s1", false);
-  assert.deepEqual({ sessionId: saved.sessionId, enabled: saved.enabled }, { sessionId: "s1", enabled: false });
-  assert.equal(store.get("s1", true), false);
-  assert.equal(store.all().s1.at, 1000);
-  assert.equal(store.remove("s1"), true);
-  assert.equal(store.get("s1", true), true, "删掉后回到默认");
-  assert.equal(store.remove("s1"), false);
-});
-
-test("capture 存储：落盘格式正确，重启后开关仍在", (t) => {
+test("capture 存储：没有文件时跟全局默认，set 写 v2 并返回布尔", (t) => {
   const file = join(tempDir(t), CAPTURE_FILE);
-  const first = createCaptureStore({ file, now: () => 2000 });
-  first.set("sess-a", false);
+  const store = createCaptureStore({ file, now: () => 1111 });
+  assert.equal(store.isEnabled(true), true, "没有设置过就跟 fallback");
+  assert.equal(store.isEnabled(false), false);
+  assert.equal(store.set(false), false, "set 返回写入后的值");
+  assert.equal(store.isEnabled(true), false);
   const raw = JSON.parse(readFileSync(file, "utf8"));
-  assert.equal(raw.version, 1);
-  assert.deepEqual(raw.sessions["sess-a"], { enabled: false, at: 2000 });
-  const second = createCaptureStore({ file });
-  assert.equal(second.get("sess-a", true), false, "重启后开关要还在");
-  assert.equal(second.get("sess-b", true), true);
+  assert.deepEqual(raw, { version: 2, enabled: false, at: 1111 });
+  assert.equal(store.set(true), true);
+  assert.deepEqual(JSON.parse(readFileSync(file, "utf8")), { version: 2, enabled: true, at: 1111 });
 });
 
-test("capture 存储：超过 500 个会话淘汰最旧", (t) => {
+test("capture 存储：v2 重启读回，all() 与 stats() 形状正确", (t) => {
   const file = join(tempDir(t), CAPTURE_FILE);
-  let clock = 0;
-  const store = createCaptureStore({ file, now: () => (clock += 1) });
-  for (let i = 0; i < 501; i += 1) store.set("s" + i, true);
-  const all = store.all();
-  assert.equal(Object.keys(all).length, 500);
-  assert.equal("s0" in all, false, "最旧的那条应当被淘汰");
-  assert.equal("s1" in all, true);
-  assert.equal("s500" in all, true);
+  createCaptureStore({ file, now: () => 2222 }).set(false);
+  const again = createCaptureStore({ file });
+  assert.equal(again.isEnabled(true), false);
+  assert.deepEqual(again.all(), { version: 2, enabled: false, at: 2222 });
+  assert.deepEqual(again.stats(), { enabled: false, version: 2, lastError: "" });
 });
 
-test("capture 存储：坏文件/超限文件按空表处理，不抛", (t) => {
+test("capture 存储：v1 旧文件被忽略（不因旧 sessions 变成关），set 后升级成 v2", (t) => {
+  const file = join(tempDir(t), CAPTURE_FILE);
+  writeFileSync(file, JSON.stringify({ version: 1, sessions: { "sess-x": { enabled: false, at: 1 } } }));
+  const store = createCaptureStore({ file, now: () => 3333 });
+  assert.equal(store.isEnabled(true), true, "旧数据不许影响判定");
+  assert.equal(store.isEnabled(false), false, "没有 v2 记录时就是跟 fallback");
+  assert.equal(store.stats().version, 1, "读到时记下见过旧格式");
+  assert.equal(store.set(true), true);
+  const raw = JSON.parse(readFileSync(file, "utf8"));
+  assert.deepEqual(raw, { version: 2, enabled: true, at: 3333 });
+  assert.equal("sessions" in raw, false, "升级后旧 sessions 不再保留");
+});
+
+test("capture 存储：坏文件/超限文件按未设置处理，不影响 fallback", (t) => {
+  const dir = tempDir(t);
+  const broken = join(dir, "broken.json");
+  writeFileSync(broken, "{ not json");
+  const store = createCaptureStore({ file: broken });
+  assert.equal(store.isEnabled(true), true);
+  assert.equal(store.isEnabled(false), false);
+  assert.ok(store.stats().lastError.length > 0);
+  assert.equal(store.stats().version, 0);
+  const big = join(dir, "big.json");
+  writeFileSync(big, JSON.stringify({ version: 2, enabled: false, at: 1 }).padEnd(210 * 1024, " "));
+  const bigStore = createCaptureStore({ file: big });
+  assert.equal(bigStore.isEnabled(true), true, "超 200KB 直接忽略");
+});
+
+test("capture 存储：连续 set 顺序正确，且不留下临时文件", (t) => {
   const dir = tempDir(t);
   const file = join(dir, CAPTURE_FILE);
-  writeFileSync(file, "{ broken json");
-  const broken = createCaptureStore({ file });
-  assert.equal(broken.get("any", true), true);
-  assert.ok(broken.stats().lastError.includes("capture"));
-  const bigFile = join(dir, "big.json");
-  writeFileSync(bigFile, JSON.stringify({ version: 1, sessions: { x: { enabled: false, at: 1 } } }).padEnd(210 * 1024, " "));
-  const big = createCaptureStore({ file: bigFile });
-  assert.equal(big.get("x", true), true, "超 200KB 的文件直接忽略");
+  const store = createCaptureStore({ file, now: () => 1 });
+  store.set(true);
+  store.set(false);
+  store.set(true);
+  assert.equal(store.isEnabled(false), true);
+  assert.deepEqual(readdirSync(dir).filter(function (name) { return name.indexOf(".tmp-") >= 0; }), [], "rename 之后不该留 tmp");
+  assert.deepEqual(readdirSync(dir), [CAPTURE_FILE]);
 });
 
-test("capture ①：GET 默认开启，sessionId 为 null", (t) => {
+test("capture ①：GET 返回全局三键，没有 sessionId", (t) => {
   const webServer = fakeWebServer();
   boot(t, {}, { services: { webServer } });
   const exchange = fakeExchange("GET");
   webServer.routes[0].handler(exchange.req, exchange.res);
   const body = JSON.parse(exchange.res.body);
-  assert.deepEqual(body.capture, { sessionId: null, enabled: true, default: true });
+  assert.deepEqual(body.capture, { enabled: true, default: true, scope: "global" });
+  assert.equal("sessionId" in body.capture, false);
 });
 
-test("capture ②：关掉之后新 turn 不落库，已有记录仍在、检索仍查得到", async (t) => {
+test("capture ①b：config.ingest.capture=false 且没有 v2 记录时 GET 是关", (t) => {
   const webServer = fakeWebServer();
-  const { ctx, runtime } = boot(t, {}, { services: { webServer } });
-  const listener = sessionListener(ctx);
-  emitTurn(listener, "cap-1", 1, "第一句会落库");
-  const before = runtime.store.all();
-  assert.equal(before.length, 1);
-  const keptId = before[0].id;
-  const off = await postPanel(webServer.routes[0].handler, { action: "capture", enabled: false });
-  assert.equal(off.status, 200);
-  assert.deepEqual(off.json, { ok: true, sessionId: "cap-1", enabled: false });
-  emitTurn(listener, "cap-1", 3, "这一句不该落库");
-  assert.equal(runtime.store.all().length, 1, "关闭后条数不该增加");
-  assert.ok(runtime.ingest.stats().skippedByCapture >= 1);
-  assert.ok(runtime.store.get(keptId), "已有记忆不许删");
-  const search = await postPanel(webServer.routes[0].handler, { action: "search", query: "第一句" });
-  assert.equal(search.status, 200);
-  assert.ok(search.json.rows.some(function (row) { return row.id === keptId; }), "关闭记忆不影响检索");
+  boot(t, { ingest: { capture: false } }, { services: { webServer } });
+  const exchange = fakeExchange("GET");
+  webServer.routes[0].handler(exchange.req, exchange.res);
+  const body = JSON.parse(exchange.res.body);
+  assert.deepEqual(body.capture, { enabled: false, default: false, scope: "global" });
 });
 
-test("capture ③：再打开就恢复写入", async (t) => {
+test("capture ②：POST 写入全局，GET 立刻跟随；文件是 v2", async (t) => {
   const webServer = fakeWebServer();
-  const { ctx, runtime } = boot(t, {}, { services: { webServer } });
-  const listener = sessionListener(ctx);
-  emitTurn(listener, "cap-2", 1, "第一句");
-  await postPanel(webServer.routes[0].handler, { action: "capture", enabled: false });
-  emitTurn(listener, "cap-2", 3, "不该落库");
-  assert.equal(runtime.store.all().length, 1);
+  const { dir, runtime } = boot(t, {}, { services: { webServer } });
   const on = await postPanel(webServer.routes[0].handler, { action: "capture", enabled: true });
-  assert.deepEqual(on.json, { ok: true, sessionId: "cap-2", enabled: true });
-  emitTurn(listener, "cap-2", 5, "这句要落库");
+  assert.equal(on.status, 200);
+  assert.deepEqual(on.json, { ok: true, enabled: true, scope: "global" });
+  const exchange = fakeExchange("GET");
+  webServer.routes[0].handler(exchange.req, exchange.res);
+  assert.equal(JSON.parse(exchange.res.body).capture.enabled, true);
+  assert.deepEqual(JSON.parse(readFileSync(join(dir, CAPTURE_FILE), "utf8")).version, 2);
+  const off = await postPanel(webServer.routes[0].handler, { action: "capture", enabled: false });
+  assert.deepEqual(off.json, { ok: true, enabled: false, scope: "global" });
+  assert.equal(runtime.captureSnapshot().enabled, false);
+  assert.deepEqual(JSON.parse(readFileSync(join(dir, CAPTURE_FILE), "utf8")).enabled, false);
+});
+
+test("capture ②b：旧客户端仍传 sessionId —— 接受但忽略", async (t) => {
+  const webServer = fakeWebServer();
+  const { runtime } = boot(t, {}, { services: { webServer } });
+  const result = await postPanel(webServer.routes[0].handler, { action: "capture", enabled: false, sessionId: "old-client-session" });
+  assert.equal(result.status, 200);
+  assert.deepEqual(result.json, { ok: true, enabled: false, scope: "global" });
+  assert.equal(runtime.captureSnapshot().enabled, false, "全局值生效");
+  const on = await postPanel(webServer.routes[0].handler, { action: "capture", enabled: true, sessionId: "another" });
+  assert.equal(on.json.enabled, true);
+});
+
+test("capture ③：enabled 非布尔 → 400，且不改全局值", async (t) => {
+  const webServer = fakeWebServer();
+  const { runtime } = boot(t, {}, { services: { webServer } });
+  const before = runtime.captureSnapshot().enabled;
+  const bad = await postPanel(webServer.routes[0].handler, { action: "capture", enabled: "no" });
+  assert.equal(bad.status, 400);
+  assert.equal(bad.json.code, "bad-request");
+  assert.equal(runtime.captureSnapshot().enabled, before);
+});
+
+test("capture ④：关闭时 ingest 不写库，已有记录仍在、检索仍查得到", async (t) => {
+  const webServer = fakeWebServer();
+  const { ctx, runtime } = boot(t, {}, { services: { webServer } });
+  const listener = sessionListener(ctx);
+  emitTurn(listener, "sess-1", 1, "第一句会落库");
+  const kept = runtime.store.all();
+  assert.equal(kept.length, 1);
+  await postPanel(webServer.routes[0].handler, { action: "capture", enabled: false });
+  emitTurn(listener, "sess-2", 1, "关掉之后这句不该落库");
+  assert.equal(runtime.store.all().length, 1);
+  assert.ok(runtime.ingest.stats().skippedByCapture >= 1);
+  assert.ok(runtime.store.get(kept[0].id), "已有记忆不许删");
+  const search = await postPanel(webServer.routes[0].handler, { action: "search", query: "第一句" });
+  assert.ok(search.json.rows.some(function (row) { return row.id === kept[0].id; }), "关闭不影响检索");
+  await postPanel(webServer.routes[0].handler, { action: "capture", enabled: true });
+  emitTurn(listener, "sess-3", 1, "再打开就恢复写入");
   assert.equal(runtime.store.all().length, 2);
 });
 
-test("capture ⑤：没有活跃会话 404；enabled 非布尔 400", async (t) => {
-  const webServer = fakeWebServer();
-  const { runtime } = boot(t, {}, { services: { webServer } });
-  const none = await postPanel(webServer.routes[0].handler, { action: "capture", enabled: false });
-  assert.equal(none.status, 404);
-  assert.equal(none.json.code, "not-found");
-  const bad = await postPanel(webServer.routes[0].handler, { action: "capture", enabled: "no", sessionId: "x" });
-  assert.equal(bad.status, 400);
-  assert.equal(bad.json.code, "bad-request");
-  assert.equal(runtime.captureStore.all().x, undefined, "非法请求不许写开关");
+test("capture ⑤：开关文件坏了按「开」处理，照常写库", (t) => {
+  const dir = tempDir(t);
+  writeFileSync(join(dir, CAPTURE_FILE), "{ broken");
+  const ctx = createFakeCtx({});
+  const runtime = mount(ctx, { dataDir: dir });
+  t.after(() => ctx.dispose());
+  const listener = sessionListener(ctx);
+  emitTurn(listener, "sess-9", 1, "文件坏了也要照常记");
+  assert.equal(runtime.store.all().length, 1);
+  assert.equal(runtime.captureSnapshot().enabled, true);
 });
 
-test("capture：带显式 sessionId 时不需要活跃会话", async (t) => {
-  const webServer = fakeWebServer();
-  const { runtime } = boot(t, {}, { services: { webServer } });
-  const result = await postPanel(webServer.routes[0].handler, { action: "capture", enabled: false, sessionId: "explicit-9" });
-  assert.equal(result.status, 200);
-  assert.equal(result.json.sessionId, "explicit-9");
-  assert.equal(runtime.captureStore.get("explicit-9", true), false);
-});
-
-test("capture ⑥：/mem status 的本会话记忆行开/关都正确", async (t) => {
+test("capture ⑥：/mem status 显示「记忆记录：开/关（全局）」", async (t) => {
   const webServer = fakeWebServer();
   const commands = fakeRegistry("commands");
-  const { ctx } = boot(t, {}, { services: { webServer, commands } });
-  const listener = sessionListener(ctx);
+  boot(t, {}, { services: { webServer, commands } });
   const handler = commands.entries[0].handler;
-  emitTurn(listener, "cap-status-123456", 1, "随便一句");
   const on = await handler({ rawInput: "status" });
-  assert.ok(on.text.includes("本会话记忆：开（会话 cap-stat）"), on.text);
+  assert.ok(on.text.includes("记忆记录：开（全局）"), on.text);
   await postPanel(webServer.routes[0].handler, { action: "capture", enabled: false });
   const off = await handler({ rawInput: "status" });
-  assert.ok(off.text.includes("本会话记忆：关（会话 cap-stat）"), off.text);
+  assert.ok(off.text.includes("记忆记录：关（全局）"), off.text);
+  assert.equal(off.text.includes("本会话记忆"), false, "会话级那行已经删掉");
 });
 
-test("capture ④：开关落盘后重新挂载仍然生效", (t) => {
-  const dir = tempDir(t);
-  const first = createFakeCtx({});
-  const rt1 = mount(first, { dataDir: dir });
-  rt1.captureStore.set("persisted-1", false);
-  first.dispose();
-  const second = createFakeCtx({});
-  const rt2 = mount(second, { dataDir: dir });
-  t.after(() => second.dispose());
-  assert.equal(rt2.captureStore.get("persisted-1", true), false);
-  rt2.lastSessionId = "persisted-1";
-  assert.equal(rt2.captureSnapshot().enabled, false);
-  assert.deepEqual(Object.keys(rt2.captureStore.all()), ["persisted-1"]);
-});
-
-test("capture：全局默认 ingest.capture=false 时新会话默认不记", (t) => {
+test("capture ⑦：全局默认 false 时新会话默认不记", (t) => {
   const { ctx, runtime } = boot(t, { ingest: { capture: false } });
   const listener = sessionListener(ctx);
-  emitTurn(listener, "global-off", 1, "全局默认关闭");
+  emitTurn(listener, "sess-g", 1, "全局默认关闭");
   assert.equal(runtime.store.all().length, 0);
   assert.equal(runtime.captureSnapshot().default, false);
-  runtime.captureStore.set("global-off", true);
-  emitTurn(listener, "global-off", 3, "会话级覆盖成开");
+  runtime.captureStore.set(true);
+  emitTurn(listener, "sess-g", 3, "覆盖成开之后就写");
   assert.equal(runtime.store.all().length, 1);
+});
+
+
+test("capture 存储：isEnabled 不传 fallback 时按「开」处理", (t) => {
+  const store = createCaptureStore({ file: join(tempDir(t), CAPTURE_FILE) });
+  assert.equal(store.isEnabled(), true);
+  store.set(false);
+  assert.equal(store.isEnabled(), false);
+});
+
+test("capture 存储：v1 文件 set(false) 后同样是 v2 且值正确", (t) => {
+  const file = join(tempDir(t), CAPTURE_FILE);
+  writeFileSync(file, JSON.stringify({ version: 1, sessions: { a: { enabled: true, at: 9 } } }));
+  const store = createCaptureStore({ file, now: () => 4444 });
+  assert.equal(store.set(false), false);
+  assert.deepEqual(JSON.parse(readFileSync(file, "utf8")), { version: 2, enabled: false, at: 4444 });
+  assert.equal(createCaptureStore({ file }).isEnabled(true), false);
+});
+
+test("capture ⑧：预置 v2 文件时 GET 读文件值，default 仍是配置默认", (t) => {
+  const webServer = fakeWebServer();
+  const dir = tempDir(t);
+  writeFileSync(join(dir, CAPTURE_FILE), JSON.stringify({ version: 2, enabled: false, at: 5 }));
+  const ctx = createFakeCtx({});
+  const runtime = mount(ctx, { dataDir: dir });
+  t.after(() => ctx.dispose());
+  assert.equal(runtime.captureSnapshot().enabled, false, "文件优先");
+  assert.equal(runtime.captureSnapshot().default, true, "default 仍取 config.ingest.capture");
+  assert.equal(runtime.captureSnapshot().lastChangeAt, 5);
+  assert.equal(webServer.routes.length, 0, "没有 webServer 服务就不注册路由");
 });
 
 /* ------------------------------------------------------ 写入过滤器（第 6 轮） */

@@ -49,7 +49,7 @@
 | `emotion.mjs` | `estimateEmotion` | 中英词典 + 程度副词放大 → `{valence, arousal, cues}`；无命中时 `arousal` 取 0.3 中性基线 |
 | `consolidate.mjs` | `bigramSimilarity` `planMerge` | 相似记录归并**方案**：阈值 0.82、权重上限 0.75、每组最多 3 条；只产出 `{keep, drop, groups, patchById}`，不写库 |
 | `tiering.mjs` | `TIER_DEFAULTS` `applyTiering` `reviveOnMentionPatch` | `hot` → `cold` 的**惰性**降级：写入落库与插件启动时各扫一次（无后台定时器）；判据 = 记录是 `hot`、未 pinned、`tierSource !== "user"`、年龄 ≥ 30 天、且当前热度 < 0.35；冷层被再次提及（提及次数增加）时回升为 `hot`；启动时对存量记录按同一规则重算一次 `tier`（只改字段，不动正文） |
-| `capture.mjs` | `CAPTURE_FILE` `CAPTURE_MAX_SESSIONS` `createCaptureStore` | 会话级记忆开关的落盘：`{version:1,sessions:{[id]:{enabled,at}}}`，临时文件 + rename 原子写，最多 500 个会话（按 `at` 淘汰最旧），坏文件/超 200KB 按空表处理；只影响**新写入**，不删既有记录 |
+| `capture.mjs` | `CAPTURE_FILE` `CAPTURE_VERSION` `createCaptureStore` | 记忆开关（**全局单值**）：`{version:2,enabled,at}`，临时文件 + rename 原子写；`isEnabled(fallback)` 在无 v2 记录时回退到 `ingest.capture`，v1（按会话）记录一律不继承；坏文件/超 200KB 按未设置处理。只影响**新写入**，不删既有记录 |
 | `budget.mjs` | `tokenParts` `estimateTokens` `project` | token 估算（CJK 1 / 词 1 / 标点 0.3）与上下文裁剪：`persona`/`state` 无条件保留，其余按 `budget`/`topN` 贪心裁，产出 `{picks, tokens, dropped}` |
 
 检索层 `src/retrieval/`：

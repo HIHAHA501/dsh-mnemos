@@ -307,7 +307,7 @@ S.miniBtn = {
 S.dangerBtn = Object.assign({}, S.miniBtn, {
   border: "1px solid hsla(2, 62%, 66%, 0.72)",
   background: "hsla(2, 66%, 58%, 0.28)",
-  color: "#FFE7E4",
+  color: C.text1,
   fontWeight: 600,
 });
 S.miniSelect = {
@@ -681,7 +681,7 @@ const TIER_CHOICES = ["hot", "cold", "persona", "state"];
 const TIER_TEXT = { hot: "热", cold: "冷", persona: "人格", state: "状态" };
 const ACTION_TIMEOUT_MS = 8000;
 const FORGET_CONFIRM_MS = 3000;
-const EMPTY_CAPTURE = { status: "unknown", sessionId: null, enabled: false, default: true, note: "" };
+const EMPTY_CAPTURE = { status: "unknown", enabled: false, default: true, note: "" };
 const EMPTY_ACTIONS = { query: "", rows: [], rowStatus: {}, confirmingId: "", searchStatus: null, capture: EMPTY_CAPTURE };
 
 /**
@@ -911,10 +911,11 @@ function buildViewModel(input) {
     },
     vector: { state: vectorState, reason: vectorReason, label: VECTOR_LABELS[vectorState] || "未知状态", usable: vectorState === "on" },
     // 会话级开关：enabled=这个会话要不要写记忆，default=全局默认
+    // 全局开关：管所有会话，没有会话级差异
     capture: {
-      sessionId: typeof asObject(source.capture).sessionId === "string" ? asObject(source.capture).sessionId : null,
       enabled: asObject(source.capture).enabled !== false,
       default: asObject(source.capture).default !== false,
+      scope: "global",
     },
     recalls,
     storage: {
@@ -1165,10 +1166,10 @@ function renderAbout(h) {
       "能：搜索、钉住 / 取消钉住、改层、忘记；忘记是两步确认，3 秒内再点才真删。",
       "这是本机面板：非本机地址访问会被直接拒绝，所以这些操作只在你自己的机器上生效。",
     ]),
-    section("about-capture", "这个会话要不要记", [
-      "有个会话级开关「记忆 · 开 / 关」：首屏在「标准模式」那一行，进了会话后在输入框右侧，面板「操作」卡顶部也有一份，三处同步。",
+    section("about-capture", "要不要记进长期记忆", [
+      "「记忆 · 开 / 关」是一个**全局开关**：管所有会话，不针对某一个对话。首屏在「标准模式」那一行，进了会话后在输入框右侧，面板「操作」卡顶部也有一份，三处同步。",
       "关掉只影响之后的写入：已经记住的一条都不删，检索与注入照旧；再打开就继续记。默认是开。",
-      "开关按会话存在本机（capture.json），重启后还在；没设置过的会话跟全局默认走。",
+      "开关存在本机（capture.json），重启后还在；全局没有设置过时按 ingest.capture 的默认值走。",
       "另外，工具清单、子代理回报、工作上下文这类系统内容不会被写进记忆；被挡下的条数在 /mem status 的「已过滤」一行。",
     ]),
     section("about-privacy", "隐私与只读", [
@@ -1332,31 +1333,20 @@ function register(ctx, React) {
         });
       },
       /**
-       * 会话级开关。点击前先重新 GET 一次：会话可能已经换了，
-       * 用最新的 sessionId / enabled 决定这次该往哪个方向翻，避免把旧会话的状态套到新会话上。
+       * 全局开关：只发一次 POST，不再带 sessionId、也不再先 GET。
+       * 翻转方向以上一次 GET/POST 返回的 enabled 为准；失败 2 秒后回退到点击前的值。
        */
       onCaptureToggle() {
         if (actionStore.captureBusy) return;
         const previous = Object.assign({}, actionStore.capture);
+        const target = !previous.enabled;
         actionStore.captureBusy = true;
         push({ capture: Object.assign({}, previous, { status: "sending", note: "" }) });
-        loadPanel()
-          .then((result) => {
-            const fresh = result && result.view && result.view.capture ? result.view.capture : null;
-            const base =
-              fresh && typeof fresh.sessionId === "string"
-                ? { sessionId: fresh.sessionId, enabled: fresh.enabled !== false, default: fresh.default !== false }
-                : { sessionId: previous.sessionId, enabled: previous.enabled, default: previous.default };
-            return postAction({ action: "capture", enabled: !base.enabled, sessionId: base.sessionId || undefined }).then((res) => ({ res, base }));
-          })
-          .then((pair) => {
+        postAction({ action: "capture", enabled: target })
+          .then((res) => {
             actionStore.captureBusy = false;
-            const res = pair.res;
-            const base = pair.base;
             if (!res || res.ok !== true) {
-              push({
-                capture: { status: "failed", sessionId: base.sessionId, enabled: base.enabled, default: base.default, note: String((res && res.error) || "切换失败") },
-              });
+              push({ capture: { status: "failed", enabled: previous.enabled, default: previous.default, note: String((res && res.error) || "切换失败") } });
               // 2 秒后回退到点击前的状态（不用 confirm/alert）
               if (actionStore.captureTimer) clearTimeout(actionStore.captureTimer);
               actionStore.captureTimer = setTimeout(() => {
@@ -1368,16 +1358,15 @@ function register(ctx, React) {
             push({
               capture: {
                 status: "ready",
-                sessionId: typeof res.sessionId === "string" ? res.sessionId : base.sessionId,
-                enabled: typeof res.enabled === "boolean" ? res.enabled : !base.enabled,
-                default: base.default,
+                enabled: typeof res.enabled === "boolean" ? res.enabled : target,
+                default: previous.default,
                 note: "",
               },
             });
           })
           .catch((error) => {
             actionStore.captureBusy = false;
-            push({ capture: { status: "failed", sessionId: previous.sessionId, enabled: previous.enabled, default: previous.default, note: errText(error) } });
+            push({ capture: { status: "failed", enabled: previous.enabled, default: previous.default, note: errText(error) } });
           });
       },
       /** 两步忘记：第一次只武装确认，3 秒内再点才真发；点别的行会换目标并重置计时。 */
@@ -1453,7 +1442,7 @@ function register(ctx, React) {
           // 面板拿到的 capture 就是会话真的开关：灌进共享状态，胶囊那边立刻同步
           const cap = result.view ? result.view.capture : null;
           if (cap && actionStore.capture.status === "unknown") {
-            actionStore.capture = { status: "ready", sessionId: cap.sessionId, enabled: cap.enabled !== false, default: cap.default !== false, note: "" };
+            actionStore.capture = { status: "ready", enabled: cap.enabled !== false, default: cap.default !== false, note: "" };
             emitCapture(actionStore.capture);
           }
         });
@@ -1496,7 +1485,7 @@ function register(ctx, React) {
         return () => unsubscribeCapture(setState);
       }, []);
       hooks.useEffect(() => {
-        // 挂载时取一次 GET：拿到 capture.sessionId 与当前开关
+        // 挂载时取一次 GET：只为显示刷新，翻转方向不依赖它
         if (actionStore.capture.status !== "unknown" || actionStore.captureLoading) return undefined;
         actionStore.captureLoading = true;
         loadPanel()
@@ -1504,7 +1493,7 @@ function register(ctx, React) {
             actionStore.captureLoading = false;
             const cap = result && result.view ? result.view.capture : null;
             if (!cap) return;
-            actionStore.capture = { status: "ready", sessionId: cap.sessionId, enabled: cap.enabled !== false, default: cap.default !== false, note: "" };
+            actionStore.capture = { status: "ready", enabled: cap.enabled !== false, default: cap.default !== false, note: "" };
             setState(Object.assign({}, actionStore.capture));
             emitCapture(actionStore.capture);
           })

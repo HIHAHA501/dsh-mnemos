@@ -701,7 +701,11 @@ function panelRead(runtime, res) {
     },
     vector: typeof runtime.index.vectorStatus === "function" ? runtime.index.vectorStatus() : { state: "off" },
     recalls: Array.isArray(last.recalls) ? last.recalls : [],
-    capture: runtime.captureSnapshot(),
+    capture: (function () {
+      // GET 只暴露契约里的三键；lastChangeAt 留给 /mem status 与面板快照
+      const snapshot = runtime.captureSnapshot();
+      return { enabled: snapshot.enabled, default: snapshot.default, scope: snapshot.scope };
+    })(),
   });
 }
 
@@ -801,14 +805,9 @@ function panelAction(runtime, body, res) {
       panelFail(res, 400, "enabled 必须是 true 或 false", "bad-request");
       return;
     }
-    const requested = typeof body.sessionId === "string" ? body.sessionId.trim() : "";
-    const sessionId = requested || runtime.lastSessionId || "";
-    if (!sessionId) {
-      panelFail(res, 404, "还没有活跃会话，无法设置开关；请带上 sessionId", "not-found");
-      return;
-    }
-    const saved = runtime.captureStore.set(sessionId, body.enabled);
-    jsonResponse(res, 200, { ok: true, sessionId, enabled: saved ? saved.enabled === true : body.enabled === true });
+    // 旧客户端可能还带 sessionId：接受但忽略，全局开关没有会话维度
+    const saved = runtime.captureStore.set(body.enabled);
+    jsonResponse(res, 200, { ok: true, enabled: saved === true, scope: "global" });
     return;
   }
 
@@ -1073,12 +1072,14 @@ export function mount(ctx, rawConfig, overrides) {
       return notes.slice();
     },
     captureSnapshot() {
-      const sessionId = runtime.lastSessionId || "";
+      // 全局单一开关：没有会话级差异，lastSessionId 不再参与任何 capture 判定
       const fallback = !(config.ingest && config.ingest.capture === false);
+      const doc = captureStore.all();
       return {
-        sessionId: sessionId || null,
-        enabled: captureStore.get(sessionId, fallback),
+        enabled: captureStore.isEnabled(fallback),
         default: fallback,
+        scope: "global",
+        lastChangeAt: Number.isFinite(doc.at) ? doc.at : 0,
       };
     },
     track(value) {

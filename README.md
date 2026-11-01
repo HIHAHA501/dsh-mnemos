@@ -255,7 +255,7 @@ persona:
   records.jsonl          追加写的事件日志（一行一条 {"op":"put","r":{...}}）
   memory.snapshot.json   压缩后的全量快照
   store.lock             跨进程锁，30s 不刷新视为陈旧可抢占
-  capture.json           会话级记忆开关（{version:1,sessions:{[id]:{enabled,at}}}，最多 500 个会话）
+  capture.json           记忆开关（{version:2,enabled,at}；全局一个值）
 ```
 
 - 备份：`cp -R <dataDir> <别处>` 即可，四个文件是一致的一套（`capture.json` 丢了只会让开关回到默认「开」）。
@@ -481,7 +481,7 @@ node scripts/preview-panel.mjs > /tmp/panel-preview.html   # 最前面是 560px 
 
 | 情况 | 响应 | 面板 |
 | --- | --- | --- |
-| 本机 GET | 200 + `{stats,budget,vector,recalls,capture}` | 渲染五块 + 会话开关 |
+| 本机 GET | 200 + `{stats,budget,vector,recalls,capture}` | 渲染五块 + 记忆开关（`capture` 为 `{enabled,default,scope:"global"}`） |
 | 本机 POST（带 `x-dsh-mnemos: 1`） | 200 + `{ok,...}`：`search` / `pin` / `tier` / `forget` / `capture` | 行内显示结果 |
 | POST 缺头 / 非 JSON / 超 8KB / 未知 action | 400（超限 413）+ `{ok:false,code}` | 行内显示原因，列表不清空 |
 | 非 GET/POST | 405 + `allow: GET, POST` | 「不可用 + 原因」 |
@@ -543,14 +543,14 @@ apply: {"registered":true,"id":"dsh-mnemos"} label: 记忆星图
 | 钉住 / 取消钉住 | 结果行右侧按钮 | POST action=pin（id / pinned） |
 | 改层 | 结果行右侧下拉（热 / 冷 / 人格 / 状态） | POST action=tier（id / tier） |
 | 忘记 | 点「忘记」→ 变红「确认忘记？」→ 3 秒内再点一次 | POST action=forget（id） |
-| 本会话是否记录 | 「操作」卡顶部的「记忆 · 开 / 关」 | POST action=capture（enabled，可选 sessionId） |
+| 记忆开关（全局） | 「操作」卡顶部的「记忆 · 开 / 关」 | POST action=capture（enabled） |
 
 「忘记」是唯一不可撤销的动作，所以做了两步确认（不是 `window.confirm`——那是命令行思路）。
 动作失败会在行内显示原因、列表不清空；3 秒内没确认就自动退回，不会误删。
 
-### 这个会话要不要记（记忆 · 开 / 关）
+### 记忆开关（全局 · 记忆 · 开 / 关）
 
-不是每段对话都值得进长期记忆——一次性问答、试玩、敏感话题都该能「漏过」。所以有一个**会话级开关**：位置有三处，状态只有一份。
+一个开关管所有会话：**要么记，要么不记**。位置有三处，显示的是同一个值。
 
 | 位置 | 什么时候可见 |
 | --- | --- |
@@ -562,13 +562,17 @@ apply: {"registered":true,"id":"dsh-mnemos"} label: 记忆星图
 
 | 状态 | 含义 |
 | --- | --- |
-| 开（默认） | 这个会话的对话照常写成记忆 |
+| 开 | 对话照常写成记忆（初始值由 `ingest.capture` 决定，默认 **false**——本机当前就是关） |
 | 关 | **从这一刻起**不再写入；**已有记忆一条都不删**，检索与注入照旧 |
 | 再打开 | 从那一刻起继续记 |
 
-**落盘与范围**：开关按会话 id 存在 `<dataDir>/capture.json`（原子写、最多 500 个会话，超出淘汰最旧的），重启后仍在。没设置过的会话用全局默认 `ingest.capture`（默认开）。
+**落盘**：`<dataDir>/capture.json`，格式 `{version:2, enabled, at}`（临时文件 + rename 原子写），重启后仍在。
 
-**两个必须知道的行为**：
+**为什么是全局而不是按会话**：胶囊拿不到「你正在看哪个会话」——宿主给那个槽位的 props 是空的，它只能问宿主「最近活跃会话是谁」。按会话存的时候，就出现过「界面显示开、宿主说关」的错位（两个都是真的，只是不在说同一个会话）。改成全局之后，一处切换、处处一致。
+
+**升级注意**：旧版本按会话存的 `{version:1, sessions:{...}}` 在升级后**一律作废**，判定完全由 `ingest.capture` 决定，直到你第一次点开关才写出 v2。这是「单一开关」的应有语义，但要知道它是一次性行为。
+
+**两个界面层面的说明**：
 
 1. **首屏与输入区是两个不同的宿主槽位**（`conversation.hero.options` 与 `conversation.composer.dock`）。宿主只在「已进会话且输入框非空」时渲染后者——这就是为什么在没有会话的首屏上，胶囊会出现在上面那一行、而不是输入框旁。
 2. **胶囊显示的会话以「点击那一刻」为准**：宿主没有暴露「会话切换」事件，所以你在胶囊可见期间切了会话但没点它，标签可能还是上一个会话的值；点一下会先拉最新状态再翻转，不会改错会话。

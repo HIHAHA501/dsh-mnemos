@@ -1,16 +1,16 @@
 /**
- * 会话级「要不要记」开关的存储。
+ * 全局「记忆记录」开关的存储。
  *
- * 纯逻辑 + 一个原子落盘助手：内存里就是一张 sessionId -> {enabled, at} 的表，
- * 落盘用临时文件 + rename，读坏了就当空表——一个开关文件不该拖垮整个插件。
+ * v2 是单值语义：整台机器只有一个「记 / 不记」。v1 曾按会话存，
+ * 读到时只认版本号、忽略 sessions（旧数据不再影响任何判定），下一次写入就升级成 v2。
+ * 落盘用临时文件 + rename；文件读坏了按「没有设置」处理，判定交给调用方的默认值。
  */
 
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 
 export const CAPTURE_FILE = "capture.json";
-export const CAPTURE_VERSION = 1;
-export const CAPTURE_MAX_SESSIONS = 500;
+export const CAPTURE_VERSION = 2;
 export const CAPTURE_MAX_BYTES = 200 * 1024;
 
 function messageOf(error) {
@@ -20,35 +20,16 @@ function messageOf(error) {
 /**
  * 建一个开关存储。
  * @param {{file?: string, now?: Function}} options 落盘路径与时钟。
- * @returns {object} { get, set, all, remove, stats }
+ * @returns {object} { isEnabled, set, all, stats }
  */
 export function createCaptureStore(options = {}) {
   const file = typeof options.file === "string" && options.file.trim() ? options.file.trim() : "";
   const now = typeof options.now === "function" ? options.now : () => Date.now();
-  const sessions = new Map();
-  const state = { lastError: "", loaded: false };
+  // version 0 表示「没有可用的 v2 记录」；1 表示读到的是旧格式
+  const state = { version: 0, enabled: null, at: 0, lastError: "" };
   let seq = 0;
 
-  function toDocument() {
-    const map = {};
-    for (const [key, entry] of sessions) map[key] = { enabled: entry.enabled === true, at: entry.at };
-    return { version: CAPTURE_VERSION, sessions: map };
-  }
-
-  /** 超出上限就淘汰最旧的；at 相同再按 key 排，保证同一份输入淘汰结果一致。 */
-  function evict() {
-    if (sessions.size <= CAPTURE_MAX_SESSIONS) return;
-    const ordered = [...sessions.entries()].sort(function (left, right) {
-      const diff = (left[1].at || 0) - (right[1].at || 0);
-      if (diff !== 0) return diff;
-      return left[0] < right[0] ? -1 : left[0] > right[0] ? 1 : 0;
-    });
-    const excess = sessions.size - CAPTURE_MAX_SESSIONS;
-    for (let i = 0; i < excess; i += 1) sessions.delete(ordered[i][0]);
-  }
-
   function load() {
-    state.loaded = true;
     if (!file || !existsSync(file)) return;
     try {
       if (statSync(file).size > CAPTURE_MAX_BYTES) {
@@ -56,16 +37,21 @@ export function createCaptureStore(options = {}) {
         return;
       }
       const parsed = JSON.parse(readFileSync(file, "utf8"));
-      const source = parsed && typeof parsed === "object" && parsed.sessions && typeof parsed.sessions === "object" ? parsed.sessions : {};
-      for (const key of Object.keys(source)) {
-        const value = source[key];
-        if (!key || !value || typeof value !== "object") continue;
-        sessions.set(key, { enabled: value.enabled === true, at: Number.isFinite(Number(value.at)) ? Number(value.at) : 0 });
+      if (!parsed || typeof parsed !== "object") return;
+      if (parsed.version === CAPTURE_VERSION && typeof parsed.enabled === "boolean") {
+        state.version = CAPTURE_VERSION;
+        state.enabled = parsed.enabled;
+        state.at = Number.isFinite(Number(parsed.at)) ? Number(parsed.at) : 0;
+        return;
       }
-      evict();
+      // v1（按会话存）或任何别的形状：只记下「见过旧格式」，不做任何继承
+      state.version = Number.isFinite(Number(parsed.version)) ? Number(parsed.version) : 1;
+      state.enabled = null;
+      state.at = Number.isFinite(Number(parsed.at)) ? Number(parsed.at) : 0;
     } catch (error) {
-      sessions.clear();
-      state.lastError = "capture 文件读不出来，按空表继续：" + messageOf(error);
+      state.version = 0;
+      state.enabled = null;
+      state.lastError = "capture 文件读不出来，按未设置处理：" + messageOf(error);
     }
   }
 
@@ -75,7 +61,7 @@ export function createCaptureStore(options = {}) {
     try {
       const dir = dirname(file);
       if (dir && !existsSync(dir)) mkdirSync(dir, { recursive: true });
-      const payload = JSON.stringify(toDocument());
+      const payload = JSON.stringify({ version: CAPTURE_VERSION, enabled: state.enabled === true, at: state.at });
       if (payload.length > CAPTURE_MAX_BYTES) {
         state.lastError = "capture 文件将超过 " + CAPTURE_MAX_BYTES + " 字节，已放弃这次写入";
         return false;
@@ -101,58 +87,40 @@ export function createCaptureStore(options = {}) {
   }
 
   /**
-   * 读某个会话的开关；没覆盖过就返回 fallback（默认开）。
-   * @param {string} sessionId 会话 id。
-   * @param {boolean} fallback 全局默认。
+   * 现在要不要记。
+   * @param {boolean} fallback 没有设置过时用的全局默认。
    * @returns {boolean} 是否记录。
    */
-  function get(sessionId, fallback) {
-    const key = typeof sessionId === "string" ? sessionId.trim() : "";
-    if (key) {
-      const entry = sessions.get(key);
-      if (entry) return entry.enabled === true;
-    }
+  function isEnabled(fallback) {
+    if (state.version === CAPTURE_VERSION && typeof state.enabled === "boolean") return state.enabled;
     return fallback !== false;
   }
 
   /**
-   * 写某个会话的开关。
-   * @param {string} sessionId 会话 id（空则拒绝）。
+   * 改全局开关（写 v2）。
    * @param {boolean} enabled 是否记录。
-   * @returns {null|{sessionId: string, enabled: boolean, at: number}} 写入结果。
+   * @returns {boolean} 写入后的值。
    */
-  function set(sessionId, enabled) {
-    const key = typeof sessionId === "string" ? sessionId.trim() : "";
-    if (!key) return null;
-    const stamp = Number(now());
-    const at = Number.isFinite(stamp) ? stamp : Date.now();
+  function set(enabled) {
     const value = enabled === true;
-    sessions.set(key, { enabled: value, at });
-    evict();
+    const stamp = Number(now());
+    state.version = CAPTURE_VERSION;
+    state.enabled = value;
+    state.at = Number.isFinite(stamp) ? stamp : Date.now();
     persist();
-    return { sessionId: key, enabled: value, at };
+    return value;
   }
 
-  /** 整表快照（深拷贝，调用方改不动内部状态）。 */
+  /** 当前文档（深拷贝，调用方改不动内部状态）。 */
   function all() {
-    const map = {};
-    for (const [key, entry] of sessions) map[key] = { enabled: entry.enabled === true, at: entry.at };
-    return map;
-  }
-
-  function remove(sessionId) {
-    const key = typeof sessionId === "string" ? sessionId.trim() : "";
-    if (!key || !sessions.has(key)) return false;
-    sessions.delete(key);
-    persist();
-    return true;
+    return { version: state.version, enabled: state.enabled, at: state.at };
   }
 
   function stats() {
-    return { file, count: sessions.size, loaded: state.loaded, lastError: state.lastError, maxSessions: CAPTURE_MAX_SESSIONS, maxBytes: CAPTURE_MAX_BYTES };
+    return { enabled: state.version === CAPTURE_VERSION ? state.enabled : null, version: state.version, lastError: state.lastError };
   }
 
   load();
 
-  return { get, set, all, remove, stats };
+  return { isEnabled, set, all, stats };
 }

@@ -700,9 +700,9 @@ function captureReply(enabled, options = {}) {
   return (opt, body) => {
     if (opt.method === "POST") {
       if (options.failPost) return { status: 500, body: { ok: false, error: "写不进去", code: "internal" } };
-      return { body: { ok: true, sessionId: "s-1", enabled: body && typeof body.enabled === "boolean" ? body.enabled : !enabled } };
+      return { body: { ok: true, enabled: body && typeof body.enabled === "boolean" ? body.enabled : !enabled, scope: "global" } };
     }
-    return { body: { stats: { count: 1 }, budget: {}, vector: { state: "on" }, recalls: [], capture: { sessionId: "s-1", enabled, default: true } } };
+    return { body: { stats: { count: 1 }, budget: {}, vector: { state: "on" }, recalls: [], capture: { enabled, default: true, scope: "global" } } };
   };
 }
 
@@ -723,9 +723,12 @@ test("会话开关：点击发 POST capture，enabled 取反，成功后按返�
   findAll(tree, (n) => n.tag === "button")[0].props.onClick();
   await tick();
   await tick();
-  const sent = posts(calls).filter((c) => c.body.action === "capture")[0];
-  assert.ok(sent, "应当发出 capture");
+  const capturePosts = posts(calls).filter((c) => c.body.action === "capture");
+  assert.equal(capturePosts.length, 1, "点击只发一次 POST");
+  const sent = capturePosts[0];
   assert.equal(sent.body.enabled, false, "从开切成关");
+  assert.deepEqual(Object.keys(sent.body).sort(), ["action", "enabled"], "body 只有 action 与 enabled，不再带 sessionId");
+  assert.equal("sessionId" in sent.body, false);
   assert.equal(texts(renderPill()).includes("记忆 · 关"), true);
 });
 
@@ -778,14 +781,14 @@ test("会话开关：面板操作卡与胶囊共用同一份状态", async () =>
   assert.ok(texts(renderPill()).includes("记忆 · 关"), "胶囊跟着变：" + texts(renderPill()));
 });
 
-test("会话开关：视图模型透出 capture 三字段", () => {
+test("全局开关：视图模型只透出 enabled / default / scope，没有会话维度", () => {
   const { exports } = loadClient();
-  const view = exports.__test.buildViewModel({ capture: { sessionId: "s-9", enabled: false, default: true } });
-  assert.equal(view.capture.sessionId, "s-9");
+  const view = exports.__test.buildViewModel({ capture: { enabled: false, default: true, scope: "global" } });
   assert.equal(view.capture.enabled, false);
   assert.equal(view.capture.default, true);
+  assert.equal(view.capture.scope, "global");
+  assert.equal("sessionId" in view.capture, false, "载荷不再有会话维度");
   const blank = exports.__test.buildViewModel({});
-  assert.equal(blank.capture.sessionId, null);
   assert.equal(blank.capture.enabled, true, "缺省按开启");
 });
 

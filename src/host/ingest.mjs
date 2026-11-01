@@ -433,12 +433,12 @@ export function createIngest(options = {}) {
   }
 
   /** 把攒下的记录写进库；写满 everyTurns 轮时同步跑一次合并。 */
-  /** 会话级开关：关闭就跳过这一条（已有记忆不删、不改，检索照旧）。 */
-  function captureOn(sessionId) {
-    if (!captureStore || typeof captureStore.get !== "function") return true;
+  /** 全局「记忆记录」开关：关了就跳过写入（已有记忆不删、不改，检索照旧）。 */
+  function captureOn() {
+    if (!captureStore || typeof captureStore.isEnabled !== "function") return true;
     const fallback = !(config.ingest && config.ingest.capture === false);
     try {
-      return captureStore.get(sessionId, fallback) !== false;
+      return captureStore.isEnabled(fallback) !== false;
     } catch {
       // 开关读不出来就当开着：宁可多记，也别因为一个开关文件丢了整段对话
       return true;
@@ -450,7 +450,7 @@ export function createIngest(options = {}) {
     const batch = pending.splice(0, pending.length);
     let written = 0;
     for (const record of batch) {
-      if (!captureOn(record && record.sessionId)) {
+      if (!captureOn()) {
         counters.skippedByCapture += 1;
         continue;
       }

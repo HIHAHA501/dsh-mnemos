@@ -130,7 +130,7 @@ const actionsDemo = {
   rowStatus: {},
   confirmingId: "turn-a2",
   searchStatus: { state: "ok", text: "命中 2 条" },
-  capture: { status: "ready", sessionId: "demo-session", enabled: true, default: true, note: "" },
+  capture: { status: "ready", enabled: true, default: true, note: "" },
 };
 const realWidth = { html: serialize(renderBlocks(buildViewModel(normalPayload), hStub, null, { tab: "overview", actions: actionsDemo })) };
 // 同一份 HTML 放两个主题上下文：深色用 :root 变量，浅色用 .lightTheme 覆盖
@@ -140,13 +140,23 @@ const duo = (html) =>
 
 // 输入区胶囊三态 + 一个 composer 尺寸的 mock 条
 const pillOf = (state) => serialize(api.__test.renderCapturePill(state, null, hStub));
+// 全局开关的四种态：开 / 关 / 未知 / 失败
+const CAPTURE_STATES = [
+  { key: "on", state: { status: "ready", enabled: true, default: true, note: "" } },
+  { key: "off", state: { status: "ready", enabled: false, default: true, note: "" } },
+  { key: "unknown", state: { status: "unknown", enabled: false, default: true, note: "" } },
+  { key: "failed", state: { status: "failed", enabled: true, default: true, note: "写不进去" } },
+];
 const pillsHtml = [
   '<div class="composerMock">',
   '<span class="cmSlot">模型</span><span class="cmSlot">权限</span>',
-  pillOf({ status: "ready", sessionId: "s", enabled: true, default: true, note: "" }),
-  pillOf({ status: "ready", sessionId: "s", enabled: false, default: true, note: "" }),
-  pillOf({ status: "unknown", sessionId: null, enabled: false, default: true, note: "" }),
-  pillOf({ status: "failed", sessionId: "s", enabled: true, default: true, note: "写不进去" }),
+  CAPTURE_STATES.map((entry) => pillOf(entry.state)).join(""),
+  "</div>",
+  '<p class="cap" style="margin-top:10px">同一枚开关在面板「操作」卡顶部的四态：</p>',
+  '<div class="capStates">',
+  CAPTURE_STATES.map(
+    (entry) => '<div class="capRow">' + pillOf(entry.state) + '<span class="cmSlot">本会话是否写入长期记忆</span></div>',
+  ).join(""),
   "</div>",
 ].join("");
 const aboutWidth = { html: serialize(renderBlocks(buildViewModel(normalPayload), hStub, null, { tab: "about" })) };
@@ -207,6 +217,8 @@ const page = [
   ".sub{font-size:12.5px;margin:8px 0 0;color:#9E93B4;font-weight:600}",
   ".composerMock{display:flex;align-items:center;gap:8px;padding:10px 12px;border-radius:16px;background:rgba(255,255,255,.035);border:1px solid rgba(255,255,255,.06);width:560px;max-width:100%}",
   ".cmSlot{font-size:11.5px;color:#8F87A0;padding:3px 9px;border-radius:999px;background:rgba(255,255,255,.05)}",
+  ".capStates{display:flex;flex-direction:column;gap:8px}",
+  ".capRow{display:flex;align-items:center;gap:10px}",
   "h2{font-size:13px;margin:0;color:#D8A7C8;font-weight:600}",
   ".cap{font-size:11.5px;color:#8C8499;margin:0;min-height:32px}",
   ".surface{padding:18px;border-radius:22px;background:radial-gradient(120% 90% at 15% 0%,#1d1730,#14101c 70%);border:1px solid rgba(255,255,255,.05)}",

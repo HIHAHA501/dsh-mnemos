@@ -93,11 +93,10 @@ function renderStatus(deps) {
       " · " + personaTrigger +
       (personaHash ? "（hash " + personaHash.slice(0, 4) + "…）" : "")
   );
-  // 本会话要不要记：开关来自 captureStore，会话来自「最近活跃会话」
+  // 记忆记录是全局单开关：没有会话维度，所以不再显示会话短码
   const captureRaw = typeof deps.capture === "function" ? deps.capture() : deps.capture;
   const captureSnap = captureRaw && typeof captureRaw === "object" ? captureRaw : {};
-  const captureSession = typeof captureSnap.sessionId === "string" ? captureSnap.sessionId : "";
-  lines.push("本会话记忆：" + (captureSnap.enabled === false ? "关" : "开") + "（会话 " + (captureSession ? captureSession.slice(0, 8) : "暂无") + "）");
+  lines.push("记忆记录：" + (captureSnap.enabled === false ? "关" : "开") + "（全局）");
   const filtered = Number.isFinite(ingest.filtered) ? ingest.filtered : 0;
   if (filtered > 0) {
     const by = ingest.filteredBy || {};
