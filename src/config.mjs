@@ -16,6 +16,7 @@ export const INGEST_LLM = Object.freeze(["auto", "off"]);
 export const PERSONA_MODES = Object.freeze(["self", "external"]);
 export const PERSONA_KINDS = Object.freeze(["none", "file", "http"]);
 export const PERSONA_REFRESH = Object.freeze(["startup", "turn"]);
+export const PERSONA_ADAPTERS = Object.freeze(["text", "dafeiyu"]);
 
 /** dataDir 不在这里：它默认依赖 profile 目录，必须运行时解析。 */
 export const CONFIG_DEFAULTS = Object.freeze({
@@ -61,6 +62,7 @@ export const CONFIG_DEFAULTS = Object.freeze({
   persona: Object.freeze({
     mode: "self",
     kind: "none",
+    adapter: "text",
     path: "",
     url: "",
     timeoutMs: 2000,
@@ -197,6 +199,7 @@ export function resolveConfig(input, options = {}) {
     persona: {
       mode: pickEnum(persona.mode, PERSONA_MODES, CONFIG_DEFAULTS.persona.mode, "persona.mode", warnings),
       kind: pickEnum(persona.kind, PERSONA_KINDS, CONFIG_DEFAULTS.persona.kind, "persona.kind", warnings),
+      adapter: pickEnum(persona.adapter, PERSONA_ADAPTERS, CONFIG_DEFAULTS.persona.adapter, "persona.adapter", warnings),
       path: pickString(persona.path, CONFIG_DEFAULTS.persona.path, "persona.path", warnings),
       url: pickString(persona.url, CONFIG_DEFAULTS.persona.url, "persona.url", warnings),
       timeoutMs: pickInt(persona.timeoutMs, CONFIG_DEFAULTS.persona.timeoutMs, { min: 200, max: 10000 }, "persona.timeoutMs", warnings),

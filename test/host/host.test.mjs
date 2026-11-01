@@ -2061,3 +2061,39 @@ test("过滤器 ⑫：会话 id 形态边界——短串/大写/带前缀都不�
   assert.equal(writeFilterReason({ text: "x", sessionId: "db793fe6-1a2b-4c3d-8e9f-0123456789ab" }), "subagentSession");
 });
 /* ------------------------------------------------------ 写入过滤器（结束） */
+
+/* ------------------------------------------------------ 人格源相对路径（第 8 轮） */
+
+test("人格源：相对 url 拼到宿主 origin 上（adapter=dafeiyu）", async (t) => {
+  const seen = [];
+  const bridge = {
+    PERSONA_SOURCE_KEY: "primary",
+    async readPersonaSource(config) { seen.push(config.persona.url); return { ok: false, code: "read-failed", error: "stub" }; },
+    planPersonaRecord() { return { action: "skip", hash: "" }; },
+  };
+  const webServer = { getOrigin: () => "http://127.0.0.1:50870/" };
+  const ctx = createFakeCtx({ services: { webServer } });
+  const runtime = mount(ctx, { dataDir: tempDir(t), persona: { kind: "http", url: "/api/dsh-persona-dafeiyu", adapter: "dafeiyu" } }, { bridge });
+  t.after(() => ctx.dispose());
+  await runtime.personaReady;
+  assert.equal(runtime.webServerOrigin, "http://127.0.0.1:50870", "尾斜杠要被去掉");
+  assert.deepEqual(seen, ["http://127.0.0.1:50870/api/dsh-persona-dafeiyu"], "桥接拿到的必须是绝对地址");
+});
+
+test("人格源：相对 url 但拿不到 origin → note 提示并跳过，插件照常加载", async (t) => {
+  const seen = [];
+  const bridge = {
+    PERSONA_SOURCE_KEY: "primary",
+    async readPersonaSource() { seen.push("called"); return { ok: false, code: "read-failed" }; },
+    planPersonaRecord() { return { action: "skip", hash: "" }; },
+  };
+  const ctx = createFakeCtx({});
+  const runtime = mount(ctx, { dataDir: tempDir(t), persona: { kind: "http", url: "/api/x", adapter: "dafeiyu" } }, { bridge });
+  t.after(() => ctx.dispose());
+  await runtime.personaReady;
+  assert.deepEqual(seen, [], "拿不到 origin 就不该调桥");
+  assert.equal(runtime.persona.result, "degraded");
+  assert.equal(runtime.persona.code, "no-origin");
+  assert.ok(runtime.degraded().some((line) => line.includes("人格源未就绪（无 webServer.origin）")), runtime.degraded().join(" | "));
+});
+

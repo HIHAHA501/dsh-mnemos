@@ -170,8 +170,21 @@ async function syncPersona(runtime) {
   let source = null;
   try {
     // 桥接只认 config.persona；override 注入的块也要合进去，否则真实桥会看到 kind=none
-    const block = Object.assign({}, runtime.personaConfig || {}, { mode: cfg.mode, kind: cfg.kind });
-    source = await bridge.readPersonaSource(Object.assign({}, runtime.config, { persona: block }), {});
+    let block = Object.assign({}, runtime.personaConfig || {}, { mode: cfg.mode, kind: cfg.kind });
+    const rawUrl = typeof block.url === "string" ? block.url.trim() : "";
+    if (cfg.kind === "http" && rawUrl.charAt(0) === "/") {
+      const origin = typeof runtime.webServerOrigin === "string" ? runtime.webServerOrigin : "";
+      if (!origin) {
+        snapshot.result = "degraded";
+        snapshot.code = "no-origin";
+        runtime.note("人格源未就绪（无 webServer.origin），相对路径暂不解析");
+        return snapshot;
+      }
+      block = Object.assign({}, block, { url: origin + rawUrl });
+    }
+    source = await bridge.readPersonaSource(Object.assign({}, runtime.config, { persona: block }), {
+      origin: runtime.webServerOrigin || "",
+    });
   } catch (error) {
     snapshot.result = "failed";
     runtime.note("人格快照读取失败：" + messageOf(error));
@@ -902,12 +915,35 @@ export function createPanelHandler(runtime) {
   };
 }
 
+/**
+ * 取宿主 webServer 的 origin：端口每次启动都变，所以只能运行时问它。
+ * 依次试 getOrigin() / origin 字段 / 监听端口，都拿不到就返回空串（调用方降级）。
+ * @param {object} server webServer 服务。
+ * @returns {string} 形如 http://127.0.0.1:50870 的 origin，或空串。
+ */
+function originOf(server) {
+  try {
+    if (server && typeof server.getOrigin === "function") {
+      const value = server.getOrigin();
+      if (typeof value === "string" && value.trim()) return value.trim().replace(/\/+$/, "");
+    }
+    if (server && typeof server.origin === "string" && server.origin.trim()) return server.origin.trim().replace(/\/+$/, "");
+    const port = Number(server && (server.listenedPort != null ? server.listenedPort : server.port));
+    if (Number.isFinite(port) && port > 0) return "http://127.0.0.1:" + port;
+  } catch {
+    // 拿不到就当没有 origin
+  }
+  return "";
+}
+
 /** 面板路由：webServer 在真实组合里晚于插件发布，所以走软注入而不是一次性 ctx.get。 */
 function mountPanel(ctx, runtime) {
   const handler = createPanelHandler(runtime);
   runtime.panel = handler;
   runtime.panelState = { mounted: false, reason: "webServer 面不存在，面板路由未挂载" };
   const status = whenService(ctx, "webServer", (server) => {
+    // origin 与「能不能注册路由」是两件事：人格源的相对路径只需要前者
+    runtime.webServerOrigin = originOf(server);
     if (!server || typeof server.register !== "function") {
       runtime.panelState = { mounted: false, reason: "webServer 没有 register()，面板路由未挂载" };
       return;
@@ -1061,6 +1097,8 @@ export function mount(ctx, rawConfig, overrides) {
     ledger: createLedger(),
     ingest: null,
     captureStore,
+    // 宿主 origin（人格源的相对路径靠它解析）；webServer 面挂上时写入
+    webServerOrigin: "",
     // 最近活跃会话：session/event 与 pre-step 都会更新它，面板与 /mem status 读这一份
     lastSessionId: "",
     // 最近一次投影的账：/mem status 与面板读这一份，不在别处另算
@@ -1124,13 +1162,6 @@ export function mount(ctx, rawConfig, overrides) {
     },
   });
 
-  // 人格快照：启动同步一次；失败只记 note，不阻塞挂载
-  runtime.personaReady = syncPersona(runtime).catch((error) => {
-    runtime.persona.result = "failed";
-    runtime.note("人格快照同步异常（已跳过）：" + messageOf(error));
-    return runtime.persona;
-  });
-
   mountSection(ctx, runtime);
   mountPreStep(ctx, runtime);
   mountPersonaTurn(ctx, runtime);
@@ -1139,6 +1170,14 @@ export function mount(ctx, rawConfig, overrides) {
   mountTools(ctx, runtime);
   mountPanel(ctx, runtime);
   mountDispose(ctx, runtime);
+
+  // 人格快照：启动同步一次；失败只记 note，不阻塞挂载。
+  // 必须放在 mountPanel 之后——相对 persona.url 要用 webServer 的 origin 解析。
+  runtime.personaReady = syncPersona(runtime).catch((error) => {
+    runtime.persona.result = "failed";
+    runtime.note("人格快照同步异常（已跳过）：" + messageOf(error));
+    return runtime.persona;
+  });
   return runtime;
 }
 

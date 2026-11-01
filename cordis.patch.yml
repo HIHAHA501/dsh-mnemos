@@ -4,9 +4,17 @@
     - id: dsh-mnemos
       name: 'dsh-mnemos'
       config:
-        # 用户要求：默认不记录（面板「记忆 · 开/关」仍可按会话临时打开）
+        # 用户要求：默认不记录（面板「记忆 · 开/关」仍是全局开关，可随时打开）
         ingest:
           capture: false
+        # 人格由 dsh-persona-dafeiyu 负责编辑与注入；mnemos 只读快照、不再自己注入人设段。
+        # url 用相对路径：宿主端口每次启动都是 OS 随机的，写死端口会在下次启动失效。
+        persona:
+          mode: external
+          kind: http
+          url: /api/dsh-persona-dafeiyu
+          adapter: dafeiyu
+          refresh: startup
       # 下面全部是**示例**，全部注释掉等于用默认值跑，不是关掉插件。
       # config:
       #   enabled: true              # 关掉只停记忆功能，不卸载插件

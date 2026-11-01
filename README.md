@@ -225,6 +225,26 @@ persona:
 
 **`kind: http` 只接受本机地址**（`127.0.0.1` / `localhost` / `[::1]`）。`0.0.0.0`、`127.0.0.2`、云元数据地址 `169.254.169.254`、`https://` 一律拒绝，**而且拒绝时不发请求**——这条是硬安全线，不是建议。
 
+### 和 `dsh-persona-dafeiyu` 配合（实测可用）
+
+生态里人格插件很多，但只有 dafeiyu 提供了**可读的当前人格路由**，所以它是目前唯一能桥接的。配置长这样（写在你 profile 的 `cordis.patch.yml` 里 dsh-mnemos 的 `config` 下）：
+
+```yaml
+persona:
+  mode: external        # 人设段交给 dafeiyu，mnemos 不再注入
+  kind: http
+  url: /api/dsh-persona-dafeiyu   # 相对路径：端口每次启动都是随机的
+  adapter: dafeiyu      # 两步取：/status 拿当前 id → /persona?id= 拿正文
+  refresh: startup
+```
+
+**为什么 url 必须是相对路径**：DSH 每次启动绑的是 OS 随机端口（本机实测走过 52603 → 50870 → 51163），写死端口的配置下一次启动就失效。相对路径由宿主自己的 `webServer.origin` 在运行时拼成绝对地址；拿不到 origin 时只写一条 note、不会报错。
+
+**取人格是两步**：`GET <base>/status` → `value.current`（当前人设 id）→ `GET <base>/persona?id=<id>` → `value.text`。当前没有人设时**不会发第二次请求**，只记 `no-current-persona`。
+
+**安全**：解析后的地址必须在 `127.0.0.1` / `localhost` / `[::1]` 白名单内，否则 `not-loopback` 且**一次请求都不发**（实测：指向 `example.com` 时 fetch 调用 0 次）。
+
+效果：人格由 dafeiyu 编辑与注入，mnemos 只把「她曾是什么人格」存成一条 `tier=persona` 记忆（内容哈希幂等，变了才更新），可以检索、面板可见。
 ### 快照是怎么落库的
 
 读到人格文本 → trim → 截到 `maxChars` → 算 sha256 前 16 位 → 决定动作：

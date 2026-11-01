@@ -11,6 +11,7 @@ import { readFile as nodeReadFile } from "node:fs";
 export const PERSONA_DEFAULTS = Object.freeze({
   mode: "self",
   kind: "none",
+  adapter: "text",
   path: "",
   url: "",
   timeoutMs: 2000,
@@ -57,6 +58,76 @@ export function isLoopbackUrl(raw) {
   return host === "127.0.0.1" || host === "localhost" || host === "[::1]" || host === "::1";
 }
 
+/**
+ * 相对 url 解析：以 / 开头的地址拼到宿主 origin 上；其它形态原样当绝对 URL。
+ * 相对路径但拿不到 origin 时返回空串，由调用方降级成 no-source。
+ * @param {string} rawUrl 配置里的 url。
+ * @param {string} origin 宿主 webServer 的 origin（例如 http://127.0.0.1:50870）。
+ * @returns {string} 绝对 URL 或空串。
+ */
+export function resolvePersonaUrl(rawUrl, origin) {
+  const raw = typeof rawUrl === "string" ? rawUrl.trim() : "";
+  if (!raw) return "";
+  if (raw.charAt(0) !== "/") return raw;
+  const base = typeof origin === "string" ? origin.trim().replace(/\/+$/, "") : "";
+  return base ? base + raw : "";
+}
+
+/** 发一次 GET；超时与 HTTP 错误都收成结构化结果，绝不抛。 */
+async function requestOnce(fetchImpl, url, timeoutMs) {
+  const signal = typeof AbortSignal !== "undefined" && typeof AbortSignal.timeout === "function" ? AbortSignal.timeout(timeoutMs) : undefined;
+  try {
+    const response = await fetchImpl(url, signal === undefined ? { method: "GET" } : { method: "GET", signal });
+    if (response && response.ok === false) return failure("read-failed", "HTTP " + String(response.status) + "：" + url);
+    return { ok: true, response };
+  } catch (error) {
+    const name = error && error.name ? String(error.name) : "";
+    if (name === "TimeoutError" || name === "AbortError") return failure("timeout", "读取人格超时（" + timeoutMs + "ms）");
+    return failure("read-failed", error && error.message ? error.message : String(error));
+  }
+}
+
+/**
+ * dafeiyu 适配器：先 /status 拿当前人格 id，再 /persona?id= 拿正文。
+ * 这个插件一次只暴露一个人格，所以必须两步——单次 GET 拿不到文本。
+ * @param {Function} fetchImpl fetch 实现。
+ * @param {string} baseUrl 基址（不含尾斜杠）。
+ * @param {number} timeoutMs 单次请求超时。
+ * @returns {Promise<object>} { ok:true, text } 或 { ok:false, code, error }。
+ */
+async function readDafeiyu(fetchImpl, baseUrl, timeoutMs) {
+  const base = String(baseUrl).replace(/\/+$/, "");
+  const status = await requestOnce(fetchImpl, base + "/status", timeoutMs);
+  if (status.ok !== true) return status;
+  let statusJson;
+  try {
+    statusJson = await status.response.json();
+  } catch {
+    return failure("read-failed", "status 不是 JSON");
+  }
+  if (!statusJson || typeof statusJson !== "object" || statusJson.ok === false) {
+    return failure("read-failed", "status 返回失败");
+  }
+  const value = statusJson.value && typeof statusJson.value === "object" ? statusJson.value : null;
+  const current = value && value.current != null ? String(value.current).trim() : "";
+  if (!current) return failure("no-current-persona", "当前没有激活的人格");
+
+  const detail = await requestOnce(fetchImpl, base + "/persona?id=" + encodeURIComponent(current), timeoutMs);
+  if (detail.ok !== true) return detail;
+  let detailJson;
+  try {
+    detailJson = await detail.response.json();
+  } catch {
+    return failure("read-failed", "persona 不是 JSON");
+  }
+  if (!detailJson || typeof detailJson !== "object" || detailJson.ok === false) {
+    return failure("read-failed", "persona 返回失败");
+  }
+  const text = detailJson.value && typeof detailJson.value.text === "string" ? detailJson.value.text : "";
+  if (!text.trim()) return failure("read-failed", "persona 没有 text");
+  return { ok: true, text };
+}
+
 /** 截断后算哈希：hash 必须对应真正落库的那段文本。 */
 export function hashOf(text) {
   return createHash("sha256").update(String(text), "utf8").digest("hex").slice(0, HASH_LENGTH);
@@ -99,28 +170,28 @@ export async function readPersonaSource(config, deps = {}) {
       const reader = typeof options.readFile === "function" ? options.readFile : defaultReadFile;
       raw = String(await reader(path));
     } else {
-      const url = typeof persona.url === "string" ? persona.url.trim() : "";
-      if (!url) return failure("no-source", "persona.url 为空");
-      // 硬要求：非 loopback 连请求都不发
+      const rawUrl = typeof persona.url === "string" ? persona.url.trim() : "";
+      if (!rawUrl) return failure("no-source", "persona.url 为空");
+      // 相对路径在这里落成绝对地址：宿主端口每次启动都变，配置里不许写死
+      const url = resolvePersonaUrl(rawUrl, options.origin);
+      if (!url) return failure("no-source", "persona.url 是相对路径，但拿不到 origin");
+      // 硬要求：解析后的绝对地址不在 loopback 白名单，连请求都不发
       if (!isLoopbackUrl(url)) return failure("not-loopback", "只允许 http://127.0.0.1 / http://localhost / http://[::1]：" + url);
 
       const fetchImpl = typeof options.fetchImpl === "function" ? options.fetchImpl : globalThis.fetch;
       if (typeof fetchImpl !== "function") return failure("read-failed", "当前运行时没有 fetch");
       const timeoutMs = Math.min(10000, Math.max(200, Math.floor(num(persona.timeoutMs, PERSONA_DEFAULTS.timeoutMs))));
-      // 用运行时的 AbortSignal.timeout，不引入任何常驻定时器
-      const signal = typeof AbortSignal !== "undefined" && typeof AbortSignal.timeout === "function" ? AbortSignal.timeout(timeoutMs) : undefined;
-      let response;
-      try {
-        response = await fetchImpl(url, signal === undefined ? { method: "GET" } : { method: "GET", signal });
-      } catch (error) {
-        const name = error && error.name ? String(error.name) : "";
-        if (name === "TimeoutError" || name === "AbortError") return failure("timeout", "读取人格超时（" + timeoutMs + "ms）");
-        return failure("read-failed", error && error.message ? error.message : String(error));
+      const adapter = persona.adapter === "dafeiyu" ? "dafeiyu" : "text";
+      if (adapter === "dafeiyu") {
+        // 两步取：/status 拿当前人格 id，/persona?id= 拿正文
+        const viaAdapter = await readDafeiyu(fetchImpl, url, timeoutMs);
+        if (viaAdapter.ok !== true) return viaAdapter;
+        raw = viaAdapter.text;
+      } else {
+        const first = await requestOnce(fetchImpl, url, timeoutMs);
+        if (first.ok !== true) return first;
+        raw = String(await first.response.text());
       }
-      if (response && response.ok === false) {
-        return failure("read-failed", "HTTP " + String(response.status));
-      }
-      raw = String(await response.text());
     }
   } catch (error) {
     return failure("read-failed", error && error.message ? error.message : String(error));

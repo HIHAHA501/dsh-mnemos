@@ -7,7 +7,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { CONFIG_DEFAULTS, resolveConfig } from "../../src/config.mjs";
-import { hashOf, isLoopbackUrl, PERSONA_DEFAULTS, PERSONA_SOURCE_KEY, planPersonaRecord, readPersonaSource } from "../../src/persona-bridge.mjs";
+import { hashOf, isLoopbackUrl, PERSONA_DEFAULTS, PERSONA_SOURCE_KEY, planPersonaRecord, readPersonaSource, resolvePersonaUrl } from "../../src/persona-bridge.mjs";
 import { createRecord, normalizeMeta } from "../../src/record.mjs";
 
 /* ================================================= 组一：meta 放行（record.mjs） */
@@ -91,6 +91,7 @@ test("persona: PERSONA_DEFAULTS 冻结，且与 config 默认值逐字一致", (
   assert.deepEqual({ ...PERSONA_DEFAULTS }, {
     mode: "self",
     kind: "none",
+    adapter: "text",
     path: "",
     url: "",
     timeoutMs: 2000,
@@ -271,3 +272,103 @@ test("config: persona 默认值、钳位与非法枚举回退", () => {
   assert.equal(external.persona.kind, "http");
   assert.equal(external.persona.refresh, "turn");
 });
+
+/* ------------------------------------------------- 人格源适配器（dafeiyu） */
+
+/** 假的 fetch：按 URL 路由返回，同时把每次请求的 URL 记下来。 */
+function fakeRoutes(routes) {
+  const calls = [];
+  const impl = async function (url) {
+    calls.push(String(url));
+    const handler = routes[String(url)];
+    if (!handler) return { ok: false, status: 404, text: async function () { return ""; }, json: async function () { return {}; } };
+    return handler();
+  };
+  return { impl, calls };
+}
+
+function jsonResponse(value, status) {
+  return { ok: (status || 200) === 200, status: status || 200, text: async function () { return JSON.stringify(value); }, json: async function () { return value; } };
+}
+
+test("persona: resolvePersonaUrl —— 相对拼 origin，绝对原样，缺 origin 返回空串", () => {
+  assert.equal(resolvePersonaUrl("/api/x", "http://127.0.0.1:50870"), "http://127.0.0.1:50870/api/x");
+  assert.equal(resolvePersonaUrl("/api/x", "http://127.0.0.1:50870/"), "http://127.0.0.1:50870/api/x");
+  assert.equal(resolvePersonaUrl("/api/x", ""), "", "相对路径但没 origin → 空串");
+  assert.equal(resolvePersonaUrl("http://127.0.0.1:1/x", ""), "http://127.0.0.1:1/x", "绝对地址不碰 origin");
+  assert.equal(resolvePersonaUrl("  ", "http://127.0.0.1:1"), "");
+});
+
+test("persona: dafeiyu 两步取 —— /status 拿 id 再 /persona?id= 拿正文", async () => {
+  const base = "http://127.0.0.1:50870/api/dsh-persona-dafeiyu";
+  const routes = {};
+  routes[base + "/status"] = function () { return jsonResponse({ ok: true, value: { active: true, current: "acha" } }); };
+  routes[base + "/persona?id=acha"] = function () { return jsonResponse({ ok: true, value: { id: "acha", name: "阿茶", text: "  你是阿茶，说话慢。  " } }); };
+  const fake = fakeRoutes(routes);
+  const result = await readPersonaSource(personaConfig({ kind: "http", url: base, adapter: "dafeiyu" }), { fetchImpl: fake.impl });
+  assert.deepEqual(fake.calls, [base + "/status", base + "/persona?id=acha"]);
+  assert.equal(result.ok, true);
+  assert.equal(result.text, "你是阿茶，说话慢。");
+  assert.equal(result.hash, hashOf("你是阿茶，说话慢。"));
+});
+
+test("persona: dafeiyu 的 current 为空 → 不发第二次请求，返回 no-current-persona", async () => {
+  const base = "http://127.0.0.1:1/api/dsh-persona-dafeiyu";
+  const routes = {};
+  routes[base + "/status"] = function () { return jsonResponse({ ok: true, value: { active: false, current: null } }); };
+  const fake = fakeRoutes(routes);
+  const result = await readPersonaSource(personaConfig({ kind: "http", url: base, adapter: "dafeiyu" }), { fetchImpl: fake.impl });
+  assert.equal(result.ok, false);
+  assert.equal(result.code, "no-current-persona");
+  assert.equal(fake.calls.length, 1, "不许发第二次请求");
+});
+
+test("persona: dafeiyu 的 status 403 / 非 JSON / persona 无 text 都是结构化失败", async () => {
+  const base = "http://127.0.0.1:1/api/d";
+  const forbidden = fakeRoutes({ [base + "/status"]: function () { return { ok: false, status: 403, text: async function () { return ""; }, json: async function () { return {}; } }; } });
+  const r1 = await readPersonaSource(personaConfig({ kind: "http", url: base, adapter: "dafeiyu" }), { fetchImpl: forbidden.impl });
+  assert.equal(r1.code, "read-failed");
+  assert.ok(r1.error.includes("403"));
+  assert.equal(forbidden.calls.length, 1);
+  const notJson = fakeRoutes({ [base + "/status"]: function () { return { ok: true, status: 200, text: async function () { return "oops"; }, json: async function () { throw new Error("bad json"); } }; } });
+  const r2 = await readPersonaSource(personaConfig({ kind: "http", url: base, adapter: "dafeiyu" }), { fetchImpl: notJson.impl });
+  assert.equal(r2.code, "read-failed");
+  const noText = fakeRoutes({
+    [base + "/status"]: function () { return jsonResponse({ ok: true, value: { current: "acha" } }); },
+    [base + "/persona?id=acha"]: function () { return jsonResponse({ ok: true, value: { id: "acha" } }); },
+  });
+  const r3 = await readPersonaSource(personaConfig({ kind: "http", url: base, adapter: "dafeiyu" }), { fetchImpl: noText.impl });
+  assert.equal(r3.code, "read-failed");
+  assert.ok(r3.error.includes("text"));
+});
+
+test("persona: dafeiyu 解析出非 loopback 地址 → not-loopback 且 0 次请求", async () => {
+  const fake = fakeRoutes({});
+  const result = await readPersonaSource(personaConfig({ kind: "http", url: "http://example.com/api/d", adapter: "dafeiyu" }), { fetchImpl: fake.impl });
+  assert.equal(result.code, "not-loopback");
+  assert.equal(fake.calls.length, 0, "禁止地址不许发请求");
+});
+
+test("persona: 相对 url 由桥自己解析（deps.origin），拿不到 origin → no-source 且不发请求", async () => {
+  const origin = "http://127.0.0.1:50870";
+  const routes = {};
+  routes[origin + "/api/d/status"] = function () { return jsonResponse({ ok: true, value: { current: "acha" } }); };
+  routes[origin + "/api/d/persona?id=acha"] = function () { return jsonResponse({ ok: true, value: { text: "阿茶" } }); };
+  const fake = fakeRoutes(routes);
+  const ok = await readPersonaSource(personaConfig({ kind: "http", url: "/api/d", adapter: "dafeiyu" }), { fetchImpl: fake.impl, origin });
+  assert.equal(ok.ok, true);
+  assert.equal(ok.text, "阿茶");
+  assert.deepEqual(fake.calls, [origin + "/api/d/status", origin + "/api/d/persona?id=acha"]);
+  const noOrigin = fakeRoutes({});
+  const bad = await readPersonaSource(personaConfig({ kind: "http", url: "/api/d" }), { fetchImpl: noOrigin.impl });
+  assert.equal(bad.code, "no-source");
+  assert.equal(noOrigin.calls.length, 0);
+});
+
+test("config: persona.adapter 默认 text，非法值回退 text", () => {
+  const config = resolveConfig({ dataDir: "/tmp/x" });
+  assert.equal(config.persona.adapter, "text");
+  assert.equal(resolveConfig({ dataDir: "/tmp/x", persona: { adapter: "dafeiyu" } }).persona.adapter, "dafeiyu");
+  assert.equal(resolveConfig({ dataDir: "/tmp/x", persona: { adapter: "bogus" } }).persona.adapter, "text");
+});
+
