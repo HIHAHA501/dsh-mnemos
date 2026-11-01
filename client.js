@@ -61,6 +61,9 @@ function fmt(n) {
   }
   return out;
 }
+function errText(error) {
+  return error && error.message ? error.message : String(error);
+}
 function clampNum(v, lo, hi) {
   const n = Number(v);
   if (!Number.isFinite(n)) return lo;
@@ -328,6 +331,25 @@ S.actTier = { flex: "none", fontSize: 10.5, color: C.text3, border: "1px solid r
 S.actPin = { flex: "none", fontSize: 10.5, color: C.pink, border: "1px solid hsla(320, 60%, 78%, 0.35)", borderRadius: 6, padding: "1px 6px" };
 S.actOps = { display: "flex", gap: 6, alignItems: "center", paddingLeft: 38 };
 S.actOk = { fontSize: 11, color: C.green, paddingLeft: 38 };
+// 输入区小胶囊：22px 高，跟旁边的小控件同档，不抢戏
+S.pill = {
+  display: "inline-flex",
+  alignItems: "center",
+  gap: 6,
+  height: 22,
+  padding: "0 10px",
+  borderRadius: 999,
+  border: "1px solid hsla(320, 50%, 82%, 0.22)",
+  background: "rgba(255,255,255,0.05)",
+  color: C.text2,
+  fontSize: 11.5,
+  lineHeight: 1,
+  cursor: "pointer",
+  fontFamily: "inherit",
+  whiteSpace: "nowrap",
+};
+S.pillDot = { width: 6, height: 6, borderRadius: 999, flex: "none" };
+S.captureRow = { display: "flex", alignItems: "center", gap: 10, paddingBottom: 2 };
 S.actErr = { fontSize: 11, color: "hsl(6, 72%, 76%)", paddingLeft: 38 };
 
 function fillBar(pct, tone) {
@@ -656,7 +678,8 @@ const TIER_CHOICES = ["hot", "cold", "persona", "state"];
 const TIER_TEXT = { hot: "热", cold: "冷", persona: "人格", state: "状态" };
 const ACTION_TIMEOUT_MS = 8000;
 const FORGET_CONFIRM_MS = 3000;
-const EMPTY_ACTIONS = { query: "", rows: [], rowStatus: {}, confirmingId: "", searchStatus: null };
+const EMPTY_CAPTURE = { status: "unknown", sessionId: null, enabled: false, default: true, note: "" };
+const EMPTY_ACTIONS = { query: "", rows: [], rowStatus: {}, confirmingId: "", searchStatus: null, capture: EMPTY_CAPTURE };
 
 /**
  * 唯一的写入出口。两个必带请求头缺一个宿主就 400，所以这里写死；
@@ -694,6 +717,62 @@ async function postAction(payload, fetchImpl) {
   } finally {
     if (timer) clearTimeout(timer);
   }
+}
+
+/* ----------------------------------------------------------- 会话级开关 */
+const CAPTURE_TEXT = { on: "记忆 · 开", off: "记忆 · 关", unknown: "记忆 …", failed: "记忆 · 失败" };
+
+const captureSubscribers = new Map();
+function subscribeCapture(key, fn) {
+  if (typeof key === "string" && typeof fn === "function") captureSubscribers.set(key, fn);
+}
+function unsubscribeCapture(key) {
+  captureSubscribers.delete(key);
+}
+function emitCapture(snapshot) {
+  for (const fn of captureSubscribers.values()) {
+    try {
+      fn(snapshot);
+    } catch {
+      /* 订阅者自己炸了不影响别人 */
+    }
+  }
+}
+
+function captureLabel(state) {
+  const s = asObject(state);
+  if (s.status === "failed") return CAPTURE_TEXT.failed;
+  if (s.status === "sending" || s.status === "unknown") return CAPTURE_TEXT.unknown;
+  return s.enabled ? CAPTURE_TEXT.on : CAPTURE_TEXT.off;
+}
+
+function captureDotColor(state) {
+  const s = asObject(state);
+  if (s.status === "failed") return "hsl(6, 72%, 72%)";
+  if (s.status === "unknown" || s.status === "sending") return C.dim;
+  return s.enabled ? C.pink : C.dim;
+}
+
+/** 输入区小胶囊 / 操作卡里的同一枚开关：同一份状态、同一次 POST。 */
+function renderCapturePill(state, onToggle, h) {
+  const s = asObject(state);
+  return h(
+    "button",
+    {
+      key: "capture",
+      type: "button",
+      "aria-pressed": s.status === "ready" ? Boolean(s.enabled) : false,
+      title: s.status === "failed" ? String(s.note || "切换失败") : "这个会话要不要记进长期记忆",
+      onClick: () => {
+        if (typeof onToggle === "function") onToggle();
+      },
+      style: S.pill,
+    },
+    [
+      h("span", { key: "d", style: Object.assign({}, S.pillDot, { background: captureDotColor(s) }) }),
+      h("span", { key: "t" }, captureLabel(s)),
+    ],
+  );
 }
 
 /**
@@ -766,7 +845,12 @@ function renderActionsCard(state, handlers, h) {
 
   const body = rows.length ? rowNodes : [h("div", { key: "none", style: S.soft }, "输入关键词回车搜索；这里只列命中的前 8 条。")];
 
-  return h("section", { key: "actions", style: S.cardLight }, [headRow(h, "actions", "操作"), searchRow, statusLine].concat(body));
+  const captureRow = h("div", { key: "capture", style: S.captureRow }, [
+    renderCapturePill(asObject(s.capture), on.onCaptureToggle, h),
+    h("span", { key: "hint", style: { fontSize: 11, color: C.text3 } }, "本会话是否写入长期记忆"),
+  ]);
+
+  return h("section", { key: "actions", style: S.cardLight }, [headRow(h, "actions", "操作"), captureRow, searchRow, statusLine].concat(body));
 }
 
 /* ------------------------------------------------------------ 视图模型 */
@@ -823,6 +907,12 @@ function buildViewModel(input) {
       dropped: asList(budget.dropped).length,
     },
     vector: { state: vectorState, reason: vectorReason, label: VECTOR_LABELS[vectorState] || "未知状态", usable: vectorState === "on" },
+    // 会话级开关：enabled=这个会话要不要写记忆，default=全局默认
+    capture: {
+      sessionId: typeof asObject(source.capture).sessionId === "string" ? asObject(source.capture).sessionId : null,
+      enabled: asObject(source.capture).enabled !== false,
+      default: asObject(source.capture).default !== false,
+    },
     recalls,
     storage: {
       dataDir: typeof stats.dataDir === "string" ? stats.dataDir : null,
@@ -1070,6 +1160,7 @@ function renderAbout(h) {
     ]),
     section("about-ops", "能不能改", [
       "能：搜索、钉住 / 取消钉住、改层、忘记；忘记是两步确认，3 秒内再点才真删。",
+      "输入框旁的「记忆 · 开 / 关」只影响之后的写入：关掉不会删掉已经记住的东西，也不会影响检索与注入。",
       "这是本机面板：非本机地址访问会被直接拒绝，所以这些操作只在你自己的机器上生效。",
     ]),
     section("about-privacy", "隐私与只读", [
@@ -1151,7 +1242,18 @@ function register(ctx, React) {
   const panelStore = { status: "idle", view: null, reason: null };
 
   // 操作卡的本地状态；放在 register 闭包里，切页/重渲染都不丢，也便于测试直接驱动
-  const actionStore = { query: "", rows: [], rowStatus: {}, confirmingId: "", searchStatus: null, timer: null };
+  const actionStore = {
+    query: "",
+    rows: [],
+    rowStatus: {},
+    confirmingId: "",
+    searchStatus: null,
+    timer: null,
+    capture: Object.assign({}, EMPTY_CAPTURE),
+    captureTimer: null,
+    captureBusy: false,
+    captureLoading: false,
+  };
 
   function actionHandlers(setActions) {
     const push = (patch) => {
@@ -1162,7 +1264,10 @@ function register(ctx, React) {
         rowStatus: actionStore.rowStatus,
         confirmingId: actionStore.confirmingId,
         searchStatus: actionStore.searchStatus,
+        capture: actionStore.capture,
       });
+      // 面板与输入区胶囊共用这一份状态：谁改了都要通知另一边
+      emitCapture(actionStore.capture);
     };
     const mark = (id, state, text) => push({ rowStatus: Object.assign({}, actionStore.rowStatus, { [id]: { state, text } }) });
     return {
@@ -1218,6 +1323,55 @@ function register(ctx, React) {
           });
         });
       },
+      /**
+       * 会话级开关。点击前先重新 GET 一次：会话可能已经换了，
+       * 用最新的 sessionId / enabled 决定这次该往哪个方向翻，避免把旧会话的状态套到新会话上。
+       */
+      onCaptureToggle() {
+        if (actionStore.captureBusy) return;
+        const previous = Object.assign({}, actionStore.capture);
+        actionStore.captureBusy = true;
+        push({ capture: Object.assign({}, previous, { status: "sending", note: "" }) });
+        loadPanel()
+          .then((result) => {
+            const fresh = result && result.view && result.view.capture ? result.view.capture : null;
+            const base =
+              fresh && typeof fresh.sessionId === "string"
+                ? { sessionId: fresh.sessionId, enabled: fresh.enabled !== false, default: fresh.default !== false }
+                : { sessionId: previous.sessionId, enabled: previous.enabled, default: previous.default };
+            return postAction({ action: "capture", enabled: !base.enabled, sessionId: base.sessionId || undefined }).then((res) => ({ res, base }));
+          })
+          .then((pair) => {
+            actionStore.captureBusy = false;
+            const res = pair.res;
+            const base = pair.base;
+            if (!res || res.ok !== true) {
+              push({
+                capture: { status: "failed", sessionId: base.sessionId, enabled: base.enabled, default: base.default, note: String((res && res.error) || "切换失败") },
+              });
+              // 2 秒后回退到点击前的状态（不用 confirm/alert）
+              if (actionStore.captureTimer) clearTimeout(actionStore.captureTimer);
+              actionStore.captureTimer = setTimeout(() => {
+                actionStore.captureTimer = null;
+                push({ capture: Object.assign({}, previous, { status: previous.status === "unknown" ? "unknown" : "ready", note: "" }) });
+              }, 2000);
+              return;
+            }
+            push({
+              capture: {
+                status: "ready",
+                sessionId: typeof res.sessionId === "string" ? res.sessionId : base.sessionId,
+                enabled: typeof res.enabled === "boolean" ? res.enabled : !base.enabled,
+                default: base.default,
+                note: "",
+              },
+            });
+          })
+          .catch((error) => {
+            actionStore.captureBusy = false;
+            push({ capture: { status: "failed", sessionId: previous.sessionId, enabled: previous.enabled, default: previous.default, note: errText(error) } });
+          });
+      },
       /** 两步忘记：第一次只武装确认，3 秒内再点才真发；点别的行会换目标并重置计时。 */
       onForget(row) {
         const id = String((row && row.id) || "");
@@ -1271,6 +1425,13 @@ function register(ctx, React) {
     const actions = actState[0];
     const setActions = actState[1];
     if (hooks && typeof hooks.useEffect === "function") {
+      // 订阅会话开关：另一处（输入区胶囊）改了，这里要跟着走
+      hooks.useEffect(() => {
+        subscribeCapture("panel", (capture) => {
+          setActions((prev) => Object.assign({}, prev, { capture }));
+        });
+        return () => unsubscribeCapture("panel");
+      }, []);
       hooks.useEffect(() => {
         if (tab !== "overview") return undefined;
         if (panelStore.status !== "idle") return undefined;
@@ -1282,6 +1443,12 @@ function register(ctx, React) {
           panelStore.view = result.view || null;
           panelStore.reason = result.unavailable || null;
           setData({ status: result.unavailable ? "unavailable" : "ready", view: result.view, reason: result.unavailable || null });
+          // 面板拿到的 capture 就是会话真的开关：灌进共享状态，胶囊那边立刻同步
+          const cap = result.view ? result.view.capture : null;
+          if (cap && actionStore.capture.status === "unknown") {
+            actionStore.capture = { status: "ready", sessionId: cap.sessionId, enabled: cap.enabled !== false, default: cap.default !== false, note: "" };
+            emitCapture(actionStore.capture);
+          }
         });
         return () => {
           alive = false;
@@ -1310,6 +1477,44 @@ function register(ctx, React) {
     }
     return h("div", { style: S.panel }, body);
   }
+
+  /** 输入区那一带的小胶囊：和面板共用 actionStore.capture，谁改了另一边都会收到广播。 */
+  function CapturePill() {
+    const st = hooks ? hooks.useState(Object.assign({}, actionStore.capture)) : [EMPTY_CAPTURE, () => {}];
+    const state = st[0];
+    const setState = st[1];
+    if (hooks && typeof hooks.useEffect === "function") {
+      hooks.useEffect(() => {
+        subscribeCapture("pill", setState);
+        return () => unsubscribeCapture("pill");
+      }, []);
+      hooks.useEffect(() => {
+        // 挂载时取一次 GET：拿到 capture.sessionId 与当前开关
+        if (actionStore.capture.status !== "unknown" || actionStore.captureLoading) return undefined;
+        actionStore.captureLoading = true;
+        loadPanel()
+          .then((result) => {
+            actionStore.captureLoading = false;
+            const cap = result && result.view ? result.view.capture : null;
+            if (!cap) return;
+            actionStore.capture = { status: "ready", sessionId: cap.sessionId, enabled: cap.enabled !== false, default: cap.default !== false, note: "" };
+            setState(Object.assign({}, actionStore.capture));
+            emitCapture(actionStore.capture);
+          })
+          .catch(() => {
+            actionStore.captureLoading = false;
+          });
+        return undefined;
+      }, []);
+    }
+    if (!hooks) return renderCapturePill(EMPTY_CAPTURE, null, h);
+    const view = asObject(state).capture || state;
+    return renderCapturePill(view, () => actionHandlers(setState).onCaptureToggle(), h);
+  }
+
+  slots.inject("conversation.composer.dock", () =>
+    slots.register({ name: "conversation.composer.dock", id: "dsh-mnemos-capture", order: 0 }, CapturePill),
+  );
 
   slots.inject("settings.section", () =>
     slots.register({ name: "settings.section", id: "dsh-mnemos", order: 39, label: () => SECTION_LABEL }, MnemosPanel),
@@ -1372,6 +1577,9 @@ if (typeof window !== "undefined" && window && window.__ModuleLoader__ && typeof
         renderAbout,
         renderSegments,
         renderActionsCard,
+        renderCapturePill,
+        captureLabel,
+        EMPTY_CAPTURE,
         postAction,
         loadPanel,
         register,

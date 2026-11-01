@@ -9,6 +9,9 @@
  * 3. 无常驻定时器：合并只在「写入满 ingest.everyTurns 轮」时同步跑一次。
  */
 
+import { join } from "node:path";
+
+import { CAPTURE_FILE, createCaptureStore } from "./src/capture.mjs";
 import { resolveConfig } from "./src/config.mjs";
 import { createMemCommand } from "./src/host/commands.mjs";
 import { createIngest, demoteSweep } from "./src/host/ingest.mjs";
@@ -430,6 +433,12 @@ function mountPreStep(ctx, runtime) {
   ctx.on("agent/pre-step", async (payload, next) => {
     const decision = await next();
     if (!decision || typeof decision !== "object") return decision;
+    try {
+      const sessionId = payload && payload.agent && payload.agent.session ? payload.agent.session.id : "";
+      if (typeof sessionId === "string" && sessionId.trim()) runtime.lastSessionId = sessionId.trim();
+    } catch {
+      // 拿不到会话就保持上一个，别为记账破坏决策
+    }
     if (decision.kind !== "enter") return decision;
     // 投影先跑：它管的是「删旧正文」，与注入面在不在无关
     const projected = projectDecision(runtime, payload, decision);
@@ -459,6 +468,8 @@ function mountSessionEvents(ctx, runtime) {
   }
   const listener = (session, event) => {
     try {
+      const sessionId = session && typeof session.id === "string" ? session.id.trim() : "";
+      if (sessionId) runtime.lastSessionId = sessionId;
       runtime.ingest.handleEvent(session, event);
     } catch (error) {
       runtime.note("摄取事件失败（已跳过）：" + messageOf(error));
@@ -492,6 +503,7 @@ function mountCommands(ctx, runtime) {
       ledger: runtime.ledger,
       ingest: runtime.ingest,
       tiering: runtime.tiering,
+      capture: () => runtime.captureSnapshot(),
       notes: runtime.notes,
       now: () => Date.now(),
     });
@@ -689,6 +701,7 @@ function panelRead(runtime, res) {
     },
     vector: typeof runtime.index.vectorStatus === "function" ? runtime.index.vectorStatus() : { state: "off" },
     recalls: Array.isArray(last.recalls) ? last.recalls : [],
+    capture: runtime.captureSnapshot(),
   });
 }
 
@@ -783,7 +796,23 @@ function panelAction(runtime, body, res) {
     return;
   }
 
-  panelFail(res, 400, "未知的 action：" + (action || "(空)") + "；只支持 search | forget | pin | tier", "unsupported");
+  if (action === "capture") {
+    if (typeof body.enabled !== "boolean") {
+      panelFail(res, 400, "enabled 必须是 true 或 false", "bad-request");
+      return;
+    }
+    const requested = typeof body.sessionId === "string" ? body.sessionId.trim() : "";
+    const sessionId = requested || runtime.lastSessionId || "";
+    if (!sessionId) {
+      panelFail(res, 404, "还没有活跃会话，无法设置开关；请带上 sessionId", "not-found");
+      return;
+    }
+    const saved = runtime.captureStore.set(sessionId, body.enabled);
+    jsonResponse(res, 200, { ok: true, sessionId, enabled: saved ? saved.enabled === true : body.enabled === true });
+    return;
+  }
+
+  panelFail(res, 400, "未知的 action：" + (action || "(空)") + "；只支持 search | forget | pin | tier | capture", "unsupported");
 }
 
 /** 写通道的门槛判定：任何一条不过就拒绝，且此时还没碰过 store。 */
@@ -975,6 +1004,10 @@ export function mount(ctx, rawConfig, overrides) {
     log.debug(String(message));
   };
 
+  // 会话级「记不记」开关：和记忆库同一个 dataDir，读坏了也只是一张空表
+  const captureStore = createCaptureStore({ file: join(config.dataDir, CAPTURE_FILE) });
+  if (captureStore.stats().lastError) note("会话开关文件：" + captureStore.stats().lastError);
+
   // ingest.llm 不是摆设：没实现就在启动时说清楚，别让配置项假装生效
   if (config.ingest && config.ingest.llm !== "off") {
     note("LLM 抽取未实现（v2 才有），本轮走规则抽取：ingest.llm=" + String(config.ingest.llm));
@@ -1028,6 +1061,9 @@ export function mount(ctx, rawConfig, overrides) {
     log,
     ledger: createLedger(),
     ingest: null,
+    captureStore,
+    // 最近活跃会话：session/event 与 pre-step 都会更新它，面板与 /mem status 读这一份
+    lastSessionId: "",
     // 最近一次投影的账：/mem status 与面板读这一份，不在别处另算
     projection: null,
     disposables: [],
@@ -1035,6 +1071,15 @@ export function mount(ctx, rawConfig, overrides) {
     note,
     degraded() {
       return notes.slice();
+    },
+    captureSnapshot() {
+      const sessionId = runtime.lastSessionId || "";
+      const fallback = !(config.ingest && config.ingest.capture === false);
+      return {
+        sessionId: sessionId || null,
+        enabled: captureStore.get(sessionId, fallback),
+        default: fallback,
+      };
     },
     track(value) {
       if (typeof value === "function") runtime.disposables.push(value);
@@ -1057,6 +1102,7 @@ export function mount(ctx, rawConfig, overrides) {
         ledger: runtime.ledger.snapshot(),
         ingest: runtime.ingest ? runtime.ingest.stats() : null,
         tiering: { last: runtime.tiering.last, totals: { ...runtime.tiering.totals } },
+        capture: runtime.captureSnapshot(),
         persona: { ...runtime.persona },
         state: { ...runtime.state },
         notes: notes.slice(),
@@ -1068,6 +1114,7 @@ export function mount(ctx, rawConfig, overrides) {
     index,
     config,
     note,
+    captureStore,
     // 写入后扫描的结果回填到同一份快照，/mem status 只读这一份
     onTiering(swept) {
       runtime.tiering.last = swept;

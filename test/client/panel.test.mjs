@@ -64,6 +64,15 @@ function loadClient(options = {}) {
   return { definition, exports: definition.factory(requireImpl), sandbox, react };
 }
 
+
+/** 从 inject 捕获列表里按槽位名取组件（现在注册了两个槽位，不能靠下标）。 */
+function componentOf(captured, slotName) {
+  for (const call of captured) {
+    const entry = typeof call === "function" ? call() : call;
+    if (entry && entry.d && entry.d.name === slotName) return { component: entry.c, definition: entry.d };
+  }
+  return null;
+}
 /** 把渲染树摊平成文本，用于「五块都在」这类断言。 */
 function textOf(node) {
   if (node === null || node === undefined || node === false) return "";
@@ -140,9 +149,9 @@ test("apply 通过 ctx.get('slots') 注册 settings.section", () => {
   const { slots, calls } = fakeSlots();
   const result = exports.apply({ get: (n) => (n === "slots" ? slots : undefined) });
   assert.equal(result.registered, true);
-  assert.equal(calls.length, 1);
-  assert.equal(calls[0].name, "settings.section");
-  const registered = calls[0].fn();
+  const names = calls.map((c) => c.name).sort();
+  assert.deepEqual(names, ["conversation.composer.dock", "settings.section"], "两个槽位都要注册");
+  const registered = calls.filter((c) => c.name === "settings.section")[0].fn();
   assert.equal(registered.definition.name, "settings.section");
   assert.equal(registered.definition.id, PLUGIN_NAME);
   assert.equal(typeof registered.definition.order, "number");
@@ -156,8 +165,7 @@ test("apply 也支持 ctx.slots 直接挂载（dsh-orb 那种写法）", () => {
   const { slots, calls } = fakeSlots();
   const result = exports.apply({ get: () => undefined, slots });
   assert.equal(result.registered, true);
-  assert.equal(calls.length, 1);
-  assert.equal(calls[0].name, "settings.section");
+  assert.deepEqual(calls.map((c) => c.name).sort(), ["conversation.composer.dock", "settings.section"]);
 });
 
 /* ------------------------------------------------------------ 五块渲染 */
@@ -406,7 +414,7 @@ test("默认停在概览：分段控件两段都在，且「概览」是按下�
   const { exports } = loadClient();
   const captured = [];
   exports.apply({ get: () => ({ inject: (n, f) => captured.push(f), register: (d, c) => ({ d, c }) }) });
-  const tree = captured[0]().c();
+  const tree = componentOf(captured, "settings.section").component();
   const overview = buttonByText(tree, "概览");
   const about = buttonByText(tree, "说明");
   assert.ok(overview && about, "两段都要在");
@@ -424,7 +432,7 @@ test("点「说明」只切本地页签：setter 收到 about，且不再发请�
   });
   const captured = [];
   exports.apply({ get: () => ({ inject: (n, f) => captured.push(f), register: (d, c) => ({ d, c }) }) });
-  const tree = captured[0]().c();
+  const tree = componentOf(captured, "settings.section").component();
   const before = fetches.length;
   const about = buttonByText(tree, "说明");
   assert.equal(typeof about.props.onClick, "function");
@@ -465,7 +473,7 @@ test("说明页不发起任何 fetch，概览才取一次数", () => {
   const aboutClient = loadClient({ react: aboutReact.react, extra: counting });
   const captured = [];
   aboutClient.exports.apply({ get: () => ({ inject: (n, f) => captured.push(f), register: (d, c) => ({ d, c }) }) });
-  const aboutTree = captured[0]().c();
+  const aboutTree = componentOf(captured, "settings.section").component();
   assert.ok(texts(aboutTree).includes("每一块是什么"));
   assert.equal(fetches.length, 0, "说明页不该请求宿主，实际请求了 " + fetches.join(","));
 
@@ -474,7 +482,7 @@ test("说明页不发起任何 fetch，概览才取一次数", () => {
   const overviewClient = loadClient({ react: overviewReact.react, extra: counting });
   const captured2 = [];
   overviewClient.exports.apply({ get: () => ({ inject: (n, f) => captured2.push(f), register: (d, c) => ({ d, c }) }) });
-  captured2[0]().c();
+  componentOf(captured2, "settings.section").component();
   assert.equal(fetches.length, 1, "概览应当只取一次数据");
 });
 
@@ -502,20 +510,25 @@ async function mountPanel(reply) {
     const payload = res.body === undefined ? { ok: status < 400 } : res.body;
     return { ok: status < 400, status, text: async () => (typeof payload === "string" ? payload : JSON.stringify(payload)) };
   };
-  const slots = [];
+  const slots = {};
   let index = 0;
+  let frame = "panel";
   const react = {
     createElement: (tag, props, ...children) => ({ tag, props: props || {}, children: children.flat(Infinity) }),
     useState: (initial) => {
-      const at = index;
+      const key = frame + ":" + index;
       index += 1;
-      if (!(at in slots)) slots[at] = initial;
-      return [slots[at], (next) => {
-        slots[at] = typeof next === "function" ? next(slots[at]) : next;
+      if (!(key in slots)) slots[key] = initial;
+      return [slots[key], (next) => {
+        slots[key] = typeof next === "function" ? next(slots[key]) : next;
       }];
     },
     useEffect: (fn) => {
-      fn();
+      try {
+        fn();
+      } catch {
+        /* effect 抛错不该拖垮渲染 */
+      }
     },
   };
   const client = loadClient({ react, extra: { fetch: fetchImpl } });
@@ -523,11 +536,17 @@ async function mountPanel(reply) {
   client.exports.apply({ get: () => ({ inject: (n, f) => captured.push(f), register: (d, c) => ({ d, c }) }) });
   const render = () => {
     index = 0;
-    return captured[0]().c();
+    frame = "panel";
+    return componentOf(captured, "settings.section").component();
+  };
+  const renderPill = () => {
+    index = 0;
+    frame = "pill";
+    return componentOf(captured, "conversation.composer.dock").component();
   };
   render();
   await tick();
-  return { calls, render };
+  return { calls, render, renderPill };
 }
 
 function searchInput(tree) {
@@ -671,6 +690,101 @@ test("操作卡：404 也按 body.error 显示，不吞成裸状态码", async (
   const flat = texts(render());
   assert.ok(flat.includes("失败：没有这条记忆"), "404 要显示人话");
   assert.ok(flat.includes("已经不在了"), "失败行仍在");
+});
+
+/* --------------------------------------------------------- 会话级开关 */
+
+function captureReply(enabled, options = {}) {
+  return (opt, body) => {
+    if (opt.method === "POST") {
+      if (options.failPost) return { status: 500, body: { ok: false, error: "写不进去", code: "internal" } };
+      return { body: { ok: true, sessionId: "s-1", enabled: body && typeof body.enabled === "boolean" ? body.enabled : !enabled } };
+    }
+    return { body: { stats: { count: 1 }, budget: {}, vector: { state: "on" }, recalls: [], capture: { sessionId: "s-1", enabled, default: true } } };
+  };
+}
+
+test("会话开关：胶囊初始态取自 GET 的 capture.enabled", async () => {
+  const { renderPill } = await mountPanel(captureReply(true));
+  const tree = renderPill();
+  assert.ok(texts(tree).includes("记忆 · 开"), texts(tree));
+  const dot = findAll(tree, (n) => n.tag === "span" && n.props.style && n.props.style.background)[0];
+  assert.ok(dot, "胶囊要有个状态点");
+});
+
+test("会话开关：点击发 POST capture，enabled 取反，成功后按返回值更新", async () => {
+  const { calls, renderPill } = await mountPanel(captureReply(true));
+  renderPill();
+  await tick();
+  const tree = renderPill();
+  assert.ok(texts(tree).includes("记忆 · 开"));
+  findAll(tree, (n) => n.tag === "button")[0].props.onClick();
+  await tick();
+  await tick();
+  const sent = posts(calls).filter((c) => c.body.action === "capture")[0];
+  assert.ok(sent, "应当发出 capture");
+  assert.equal(sent.body.enabled, false, "从开切成关");
+  assert.equal(texts(renderPill()).includes("记忆 · 关"), true);
+});
+
+test("会话开关：失败显示「记忆 · 失败」，2 秒后回退", async () => {
+  const timers = [];
+  const react = makeReactWith();
+  const fetchImpl = async (url, options) => {
+    const opt = options || {};
+    const res = captureReply(true, { failPost: true })(opt, opt.body ? JSON.parse(opt.body) : null);
+    const status = res.status === undefined ? 200 : res.status;
+    return { ok: status < 400, status, text: async () => JSON.stringify(res.body) };
+  };
+  const client = loadClient({
+    react: react.react,
+    extra: { fetch: fetchImpl, setTimeout: (fn, ms) => { timers.push({ fn, ms }); return timers.length; }, clearTimeout: () => {} },
+  });
+  const captured = [];
+  client.exports.apply({ get: () => ({ inject: (n, f) => captured.push(f), register: (d, c) => ({ d, c }) }) });
+  let index = 0;
+  const pill = () => {
+    index = 0;
+    return captured.map((f) => f()).filter((e) => e.d.name === "conversation.composer.dock")[0].c();
+  };
+  pill();
+  await tick();
+  const tree = pill();
+  findAll(tree, (n) => n.tag === "button")[0].props.onClick();
+  await tick();
+  await tick();
+  assert.ok(texts(pill()).includes("记忆 · 失败"), texts(pill()));
+  const revert = timers.filter((t) => t.ms === 2000)[0];
+  assert.ok(revert, "失败后要排一个 2 秒回退");
+  revert.fn();
+  assert.ok(texts(pill()).includes("记忆 · 开"), "回退到点击前的状态");
+});
+
+test("会话开关：面板操作卡与胶囊共用同一份状态", async () => {
+  const { calls, render, renderPill } = await mountPanel(captureReply(true));
+  renderPill();
+  await tick();
+  render();
+  await tick();
+  const card = findAll(render(), (n) => n.tag === "button" && texts(n).trim() === "记忆 · 开")[0];
+  assert.ok(card, "操作卡顶部要有同一枚开关");
+  card.props.onClick();
+  await tick();
+  await tick();
+  const sent = posts(calls).filter((c) => c.body.action === "capture")[0];
+  assert.ok(sent, "面板也要发同一个 POST");
+  assert.ok(texts(renderPill()).includes("记忆 · 关"), "胶囊跟着变：" + texts(renderPill()));
+});
+
+test("会话开关：视图模型透出 capture 三字段", () => {
+  const { exports } = loadClient();
+  const view = exports.__test.buildViewModel({ capture: { sessionId: "s-9", enabled: false, default: true } });
+  assert.equal(view.capture.sessionId, "s-9");
+  assert.equal(view.capture.enabled, false);
+  assert.equal(view.capture.default, true);
+  const blank = exports.__test.buildViewModel({});
+  assert.equal(blank.capture.sessionId, null);
+  assert.equal(blank.capture.enabled, true, "缺省按开启");
 });
 
 /* ------------------------------------------------------------- 源码形态 */

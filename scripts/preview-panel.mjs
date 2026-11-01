@@ -130,8 +130,21 @@ const actionsDemo = {
   rowStatus: {},
   confirmingId: "turn-a2",
   searchStatus: { state: "ok", text: "命中 2 条" },
+  capture: { status: "ready", sessionId: "demo-session", enabled: true, default: true, note: "" },
 };
 const realWidth = { html: serialize(renderBlocks(buildViewModel(normalPayload), hStub, null, { tab: "overview", actions: actionsDemo })) };
+
+// 输入区胶囊三态 + 一个 composer 尺寸的 mock 条
+const pillOf = (state) => serialize(api.__test.renderCapturePill(state, null, hStub));
+const pillsHtml = [
+  '<div class="composerMock">',
+  '<span class="cmSlot">模型</span><span class="cmSlot">权限</span>',
+  pillOf({ status: "ready", sessionId: "s", enabled: true, default: true, note: "" }),
+  pillOf({ status: "ready", sessionId: "s", enabled: false, default: true, note: "" }),
+  pillOf({ status: "unknown", sessionId: null, enabled: false, default: true, note: "" }),
+  pillOf({ status: "failed", sessionId: "s", enabled: true, default: true, note: "写不进去" }),
+  "</div>",
+].join("");
 const aboutWidth = { html: serialize(renderBlocks(buildViewModel(normalPayload), hStub, null, { tab: "about" })) };
 
 const states = [
@@ -183,6 +196,8 @@ const page = [
   ".case{display:flex;flex-direction:column;gap:10px}",
   ".real{align-items:flex-start}",
   ".sub{font-size:12.5px;margin:8px 0 0;color:#9E93B4;font-weight:600}",
+  ".composerMock{display:flex;align-items:center;gap:8px;padding:10px 12px;border-radius:16px;background:rgba(255,255,255,.035);border:1px solid rgba(255,255,255,.06);width:560px;max-width:100%}",
+  ".cmSlot{font-size:11.5px;color:#8F87A0;padding:3px 9px;border-radius:999px;background:rgba(255,255,255,.05)}",
   "h2{font-size:13px;margin:0;color:#D8A7C8;font-weight:600}",
   ".cap{font-size:11.5px;color:#8C8499;margin:0;min-height:32px}",
   ".surface{padding:18px;border-radius:22px;background:radial-gradient(120% 90% at 15% 0%,#1d1730,#14101c 70%);border:1px solid rgba(255,255,255,.05)}",
@@ -205,7 +220,12 @@ const page = [
   '<p class="cap">点顶部「说明」看到的就是这一屏：纯本地切页，不发请求、不写数据。</p>',
   '<div class="surface" style="width:560px;max-width:100%">' + aboutWidth.html + "</div>",
   "</section>",
-  '<h2 class="sub">③ 对照：三态（1280 宽网格，仅看结构差异）</h2>',
+  '<section class="case real" id="pills">',
+  "<h2>③ 输入区胶囊（开 / 关 / 未知 / 失败）</h2>",
+  '<p class="cap">真身挂在 conversation.composer.dock：22px 高，与旁边的小胶囊同档；点击发 POST { action: "capture" }。</p>',
+  pillsHtml,
+  "</section>",
+  '<h2 class="sub">④ 对照：三态（1280 宽网格，仅看结构差异）</h2>',
   '<div class="cases">',
   ...states.map((s) =>
     [

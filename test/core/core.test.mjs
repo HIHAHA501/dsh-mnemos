@@ -38,7 +38,7 @@ test("config: 默认值与契约逐字一致", () => {
   assert.equal(config.topN, 6);
   assert.deepEqual({ ...config.vector }, { enabled: "auto", provider: "none", model: null, endpoint: null, apiKeyEnv: null });
   assert.deepEqual({ ...config.proactive }, { enabled: true, quoteThreshold: 0.62, askThreshold: 0.45, noiseFloor: 0.18, maxPerTurn: 1 });
-  assert.deepEqual({ ...config.ingest }, { llm: "auto", everyTurns: 20 });
+  assert.deepEqual({ ...config.ingest }, { llm: "auto", everyTurns: 20, capture: true });
   assert.equal(config.debug, false);
   assert.equal(config.dataDir, "/tmp/mnemos-test");
 });

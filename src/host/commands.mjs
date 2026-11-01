@@ -93,6 +93,11 @@ function renderStatus(deps) {
       " · " + personaTrigger +
       (personaHash ? "（hash " + personaHash.slice(0, 4) + "…）" : "")
   );
+  // 本会话要不要记：开关来自 captureStore，会话来自「最近活跃会话」
+  const captureRaw = typeof deps.capture === "function" ? deps.capture() : deps.capture;
+  const captureSnap = captureRaw && typeof captureRaw === "object" ? captureRaw : {};
+  const captureSession = typeof captureSnap.sessionId === "string" ? captureSnap.sessionId : "";
+  lines.push("本会话记忆：" + (captureSnap.enabled === false ? "关" : "开") + "（会话 " + (captureSession ? captureSession.slice(0, 8) : "暂无") + "）");
   const notes = Array.isArray(deps.notes) ? deps.notes : [];
   // 降级记录前 5 条都露出来：像 ingest.llm 这种「配置项没实现」必须看得见
   if (notes.length) lines.push("degraded: " + notes.slice(0, 5).join(" | "));

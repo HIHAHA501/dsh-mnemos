@@ -333,11 +333,12 @@ export function createIngest(options = {}) {
   const now = typeof options.now === "function" ? options.now : () => Date.now();
   const note = typeof options.note === "function" ? options.note : () => {};
   const onTiering = typeof options.onTiering === "function" ? options.onTiering : null;
+  const captureStore = options.captureStore || null;
   const everyTurns = Math.max(1, Math.floor(Number(config.ingest && config.ingest.everyTurns) || 20));
 
   const seen = new Map();
   const pending = [];
-  const counters = { events: 0, stored: 0, duplicates: 0, skipped: 0, batches: 0, turns: 0, merges: 0, mergeErrors: 0, lastMergeAt: 0, demoted: 0, revived: 0 };
+  const counters = { events: 0, stored: 0, duplicates: 0, skipped: 0, skippedByCapture: 0, batches: 0, turns: 0, merges: 0, mergeErrors: 0, lastMergeAt: 0, demoted: 0, revived: 0 };
 
   function remember(key) {
     seen.set(key, true);
@@ -392,11 +393,27 @@ export function createIngest(options = {}) {
   }
 
   /** 把攒下的记录写进库；写满 everyTurns 轮时同步跑一次合并。 */
+  /** 会话级开关：关闭就跳过这一条（已有记忆不删、不改，检索照旧）。 */
+  function captureOn(sessionId) {
+    if (!captureStore || typeof captureStore.get !== "function") return true;
+    const fallback = !(config.ingest && config.ingest.capture === false);
+    try {
+      return captureStore.get(sessionId, fallback) !== false;
+    } catch {
+      // 开关读不出来就当开着：宁可多记，也别因为一个开关文件丢了整段对话
+      return true;
+    }
+  }
+
   function flush() {
     if (!pending.length) return 0;
     const batch = pending.splice(0, pending.length);
     let written = 0;
     for (const record of batch) {
+      if (!captureOn(record && record.sessionId)) {
+        counters.skippedByCapture += 1;
+        continue;
+      }
       try {
         if (store && typeof store.upsert === "function") store.upsert(record);
         else if (store && typeof store.insert === "function") store.insert(record);
