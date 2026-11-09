@@ -1,6 +1,6 @@
 {
   "name": "dsh-mnemos",
-  "version": "0.1.0",
+  "version": "0.1.2",
   "description": "DSH 的本地长期记忆插件：记录、热度、情绪与上下文预算，零运行时依赖",
   "type": "module",
   "main": "index.mjs",

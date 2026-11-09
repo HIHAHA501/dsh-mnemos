@@ -1,5 +1,16 @@
 # 更新记录
 
+## v0.1.2 — 只改测试门槛，运行时与 v0.1.1 等价
+
+- `test/retrieval/perf.test.mjs` 的 4 个绝对耗时门槛默认放宽 10 倍；严格基准用 `MNEMOS_PERF_STRICT=1 node --test`
+- 这个版本没有任何运行时行为变化，发它只是让 tag 与 main 对齐（v0.1.1 之后又落了这一个测试改动）
+
+## v0.1.1 — 测试不再赌时钟；Node 22 纳入必绿矩阵
+
+- persona 超时用例改用注入的 `AbortController`（`AbortSignal.timeout()` 的定时器是 unref 的，不撑事件循环）
+- store 性能用例的 300ms 硬门槛放宽（CI 上 621ms 直接红）
+- CI 矩阵：`node22-ubuntu` + `node24-{ubuntu,windows,macos}`
+
 ## v0.1.0 — 首个公开版本
 
 记忆本体：
