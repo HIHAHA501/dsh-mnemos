@@ -187,7 +187,17 @@ test("persona: HTTP 非 200 → read-failed", async () => {
 });
 
 test("persona: 超时 → timeout（超时信号真的生效）", async () => {
+  // 不赌 200ms 的真实时钟：注入自己的 AbortController，用 setImmediate 立刻 abort。
+  // 原来靠 AbortSignal.timeout() 的 unref 定时器，在"运行时不替测试保活"的 Node 上
+  // 会以 "Promise resolution is still pending but the event loop has already resolved" 失败。
   const result = await readPersonaSource(personaConfig({ kind: "http", url: "http://127.0.0.1/slow", timeoutMs: 200 }), {
+    signalOf: function () {
+      const controller = new AbortController();
+      setImmediate(function () {
+        controller.abort();
+      });
+      return controller.signal;
+    },
     fetchImpl: function (url, init) {
       return new Promise(function (_resolve, reject) {
         const signal = init && init.signal;
@@ -202,6 +212,31 @@ test("persona: 超时 → timeout（超时信号真的生效）", async () => {
   });
   assert.equal(result.ok, false);
   assert.equal(result.code, "timeout");
+});
+
+test("persona: 注入的 signalOf 真的被用上（耗时远低于 timeoutMs，不赌时钟）", async () => {
+  const started = Date.now();
+  const result = await readPersonaSource(personaConfig({ kind: "http", url: "http://127.0.0.1/slow", timeoutMs: 5000 }), {
+    signalOf: function () {
+      const controller = new AbortController();
+      setImmediate(function () {
+        controller.abort();
+      });
+      return controller.signal;
+    },
+    fetchImpl: function (url, init) {
+      return new Promise(function (_resolve, reject) {
+        init.signal.addEventListener("abort", function () {
+          const error = new Error("aborted");
+          error.name = "TimeoutError";
+          reject(error);
+        });
+      });
+    },
+  });
+  const elapsed = Date.now() - started;
+  assert.equal(result.code, "timeout");
+  assert.ok(elapsed < 1000, "用了注入信号就该立刻返回，实际耗时 " + elapsed + "ms（timeoutMs 是 5000）");
 });
 
 test("persona: 空文本 → empty", async () => {

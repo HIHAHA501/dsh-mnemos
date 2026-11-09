@@ -73,9 +73,22 @@ export function resolvePersonaUrl(rawUrl, origin) {
   return base ? base + raw : "";
 }
 
+/**
+ * 默认超时信号。注意：`AbortSignal.timeout()` 的定时器是 unref 的，它**不会**撑住事件循环
+ * （本机实测：只挂一个 200ms 的 timeout、再 await 一个永不 resolve 的 promise，进程立刻报
+ * "unsettled top-level await"）。生产里宿主总有别的句柄在跑，所以没影响；但测试不能依赖它，
+ * 否则在"运行时不替测试保活"的 Node（CI 上的 22 就是这样）会直接判为
+ * "Promise resolution is still pending but the event loop has already resolved"。
+ * 因此超时信号做成可注入：测试给一个自带的 AbortController，不赌时钟。
+ */
+function defaultSignal(timeoutMs) {
+  return typeof AbortSignal !== "undefined" && typeof AbortSignal.timeout === "function" ? AbortSignal.timeout(timeoutMs) : undefined;
+}
+
 /** 发一次 GET；超时与 HTTP 错误都收成结构化结果，绝不抛。 */
-async function requestOnce(fetchImpl, url, timeoutMs) {
-  const signal = typeof AbortSignal !== "undefined" && typeof AbortSignal.timeout === "function" ? AbortSignal.timeout(timeoutMs) : undefined;
+async function requestOnce(fetchImpl, url, timeoutMs, signalOf) {
+  const make = typeof signalOf === "function" ? signalOf : defaultSignal;
+  const signal = make(timeoutMs);
   try {
     const response = await fetchImpl(url, signal === undefined ? { method: "GET" } : { method: "GET", signal });
     if (response && response.ok === false) return failure("read-failed", "HTTP " + String(response.status) + "：" + url);
@@ -95,9 +108,9 @@ async function requestOnce(fetchImpl, url, timeoutMs) {
  * @param {number} timeoutMs 单次请求超时。
  * @returns {Promise<object>} { ok:true, text } 或 { ok:false, code, error }。
  */
-async function readDafeiyu(fetchImpl, baseUrl, timeoutMs) {
+async function readDafeiyu(fetchImpl, baseUrl, timeoutMs, signalOf) {
   const base = String(baseUrl).replace(/\/+$/, "");
-  const status = await requestOnce(fetchImpl, base + "/status", timeoutMs);
+  const status = await requestOnce(fetchImpl, base + "/status", timeoutMs, signalOf);
   if (status.ok !== true) return status;
   let statusJson;
   try {
@@ -112,7 +125,7 @@ async function readDafeiyu(fetchImpl, baseUrl, timeoutMs) {
   const current = value && value.current != null ? String(value.current).trim() : "";
   if (!current) return failure("no-current-persona", "当前没有激活的人格");
 
-  const detail = await requestOnce(fetchImpl, base + "/persona?id=" + encodeURIComponent(current), timeoutMs);
+  const detail = await requestOnce(fetchImpl, base + "/persona?id=" + encodeURIComponent(current), timeoutMs, signalOf);
   if (detail.ok !== true) return detail;
   let detailJson;
   try {
@@ -184,11 +197,11 @@ export async function readPersonaSource(config, deps = {}) {
       const adapter = persona.adapter === "dafeiyu" ? "dafeiyu" : "text";
       if (adapter === "dafeiyu") {
         // 两步取：/status 拿当前人格 id，/persona?id= 拿正文
-        const viaAdapter = await readDafeiyu(fetchImpl, url, timeoutMs);
+        const viaAdapter = await readDafeiyu(fetchImpl, url, timeoutMs, options.signalOf);
         if (viaAdapter.ok !== true) return viaAdapter;
         raw = viaAdapter.text;
       } else {
-        const first = await requestOnce(fetchImpl, url, timeoutMs);
+        const first = await requestOnce(fetchImpl, url, timeoutMs, options.signalOf);
         if (first.ok !== true) return first;
         raw = String(await first.response.text());
       }
