@@ -1,8 +1,7 @@
 name: ci
 
-# DSH 桌面端自带 Node 24（崩溃日志里 node: 24.21.0），所以 24 是必须绿的主线。
-# Node 22 单独跑一个 job 并且不卡合并：本机没有 22 可复现，已知在 22 上
-# 有 1 个 persona 超时用例不通过（cancelledByParent 连带取消同文件后续用例）。
+# Node 22 一度红过（persona 超时用例赌了 AbortSignal.timeout 的 unref 定时器），
+# 用例改成注入 AbortController 之后 22 与 24 都绿，所以 22 留在矩阵里当护栏。
 on:
   push:
     branches: [main]
@@ -12,29 +11,25 @@ on:
 
 jobs:
   test:
-    name: node24-${{ matrix.os }}
+    name: node${{ matrix.node }}-${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
+        node: ["22", "24"]
+        exclude:
+          # 22 只看 linux：跨平台差异由 24 的三平台覆盖，避免矩阵翻倍
+          - os: windows-latest
+            node: "22"
+          - os: macos-latest
+            node: "22"
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: "24"
+          node-version: ${{ matrix.node }}
       # 零运行时依赖：不需要 install，直接跑测试
       - run: node --test
       - run: node --check index.mjs
       - run: node --check client.js
-
-  legacy-node22:
-    name: node22-ubuntu (informational)
-    runs-on: ubuntu-latest
-    continue-on-error: true
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "22"
-      - run: node --test

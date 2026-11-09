@@ -7,7 +7,7 @@ DSH 的本地长期记忆插件：把对话里值得留下的东西写成记录�
 
 | 部分 | 状态 | 依据 |
 | --- | --- | --- |
-| 全部 349 个测试 | ✅ 全绿 | `node --test`（零运行时依赖，不需要 install） |
+| 全部 354 个测试 | ✅ 全绿 | `node --test`（零运行时依赖，不需要 install） |
 | 宿主进程内加载 | ✅ 已验证（本机 `desktop` profile 长期挂着跑） | `/.dsh-mnemos/panel` 返回 200 |
 | 浏览器内渲染 | ✅ 已验证（设置页「记忆星图」的真实 UI） | 概览 / 星图 / 说明三个页签 |
 | 人格同步（persona） | ✅ 已验证（对接 dsh-persona-dafeiyu，含相对路径解析与节流） | `/api/dsh-persona-dafeiyu/status` → 快照写入并原地更新 |
@@ -15,7 +15,7 @@ DSH 的本地长期记忆插件：把对话里值得留下的东西写成记录�
 | 记忆星图 | ✅ 已验证（三维球壳 + 投影 + 预渲染贴图 + 未点亮空位） | 抽出绘制函数单独渲染截图核对 |
 | 向量通道（local / api） | ❌ **从未跑通过真实请求** | 全仓库没有代码设置 `globalThis.__dshMnemosOnnx`，只有 `vector.mjs` 在读 |
 | Windows 上的行为 | ✅ **已验证**（CI `node24-windows-latest` 全绿） | 这一关抓到真 bug：Windows 上 `rename` 覆盖被占用的目标会抛 EPERM，已加退避 + 原地覆盖兜底 |
-| Node 22 | ⚠️ **部分用例不通过** | CI 上 1 个 persona 超时用例失败并连带取消同文件后续用例；`engines` 因此收紧到 `>=24` |
+| Node 22 | ✅ **已验证**（CI `node22-ubuntu` 全绿） | 曾经红过：一个 persona 超时用例赌了 `AbortSignal.timeout` 的 unref 定时器；改成注入 `AbortController` 后两个版本都绿 |
 
 ### 验证状态分成三档（不美化）
 
