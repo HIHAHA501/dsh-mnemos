@@ -6,7 +6,8 @@
  * 落盘用临时文件 + rename；读坏了按「没有设置」处理，判定交给调用方的默认值。
  */
 
-import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { replaceFile } from "./atomic.mjs";
 import { dirname } from "node:path";
 
 export const CAPTURE_FILE = "capture.json";
@@ -105,7 +106,7 @@ export function createCaptureStore(options = {}) {
       tmp = file + ".tmp-" + process.pid + "-" + seq;
       writeFileSync(tmp, payload);
       // rename 是原子的：要么旧文件、要么新文件，不会读到写了一半的表
-      renameSync(tmp, file);
+      replaceFile(tmp, file);
       state.lastError = "";
       return true;
     } catch (error) {

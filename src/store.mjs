@@ -4,7 +4,8 @@
  * 而记忆是用户级资产，存储格式必须在任何 node 版本上都能用读文件的方式捞回来。
  */
 
-import { closeSync, existsSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, writeFileSync, writeSync } from "node:fs";
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync, rmSync, writeFileSync, writeSync } from "node:fs";
+import { replaceFile } from "./atomic.mjs";
 import { join } from "node:path";
 
 import { cloneRecord, normalizeRecord } from "./record.mjs";
@@ -94,7 +95,7 @@ export function createStore(options = {}) {
     const payload = JSON.stringify({ owner, pid: process.pid, at, version: SNAPSHOT_VERSION });
     const tmp = tempPath(lockPath);
     writeFileSync(tmp, payload);
-    renameSync(tmp, lockPath);
+    replaceFile(tmp, lockPath);
     lastLockRefreshAt = at;
   }
 
@@ -161,7 +162,7 @@ export function createStore(options = {}) {
     for (const record of records.values()) body += JSON.stringify({ op: "put", r: record }) + "\n";
     const tmp = tempPath(logPath);
     writeFileSync(tmp, body);
-    renameSync(tmp, logPath);
+    replaceFile(tmp, logPath);
     logLines = records.size;
   }
 
@@ -219,7 +220,7 @@ export function createStore(options = {}) {
     const payload = { version: SNAPSHOT_VERSION, savedAt, count: records.size, records: Array.from(records.values()) };
     const tmp = tempPath(snapshotPath);
     writeFileSync(tmp, JSON.stringify(payload));
-    renameSync(tmp, snapshotPath);
+    replaceFile(tmp, snapshotPath);
     // 先落快照再清日志：反过来的话，两步之间崩溃就真的少一段数据；这个顺序最坏只是重放一遍幂等的 put
     closeLogFd();
     writeFileSync(logPath, "");
