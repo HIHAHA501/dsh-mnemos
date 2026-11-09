@@ -18,5 +18,8 @@
 
 工程：
 
-- 零运行时依赖；349 个测试；`node --test` 直接跑
+- 零运行时依赖；353 个测试；`node --test` 直接跑
+- 落盘安全：`src/atomic.mjs` 的 `replaceFile()` 在 Windows 上对 `rename` 的 EPERM/EBUSY 先退避重试，
+  仍失败则退化为原地覆盖（失去原子性换数据落地——Windows CI 上这是真的会挂）
+- CI：`ubuntu` / `windows` / `macos` × Node 24 全绿；Node 22 作为 informational job 保留
 - 宿主所有 client.js 共用一个脚本作用域，本插件整份包在 IIFE 内避免顶层重名
