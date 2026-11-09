@@ -4,6 +4,13 @@
 > **范围**：核心层 `src/*.mjs`（7）、检索层 `src/retrieval/*.mjs`（5）、宿主接线层
 > `index.mjs` + `src/host/*.mjs`（6）、Web 半边 `client.js`（1）——共 19 个文件，全部读过再写。
 
+> **已知陷阱（2026-11-01 实测）：client.js 必须整份包在 IIFE 里。**
+> 宿主把**所有插件**的 `client.js` 拼进同一个脚本作用域（`dsh-app://app/plugins/??a/client.js,b/client.js,…`），
+> 所以任何**顶层** `const` / `function` 都会跨插件撞名。实测事故：`dsh-safeguard` 与 `dsh-mnemos` 同时声明了
+> `PANEL_PATH`，导致 `Uncaught SyntaxError: Identifier 'PANEL_PATH' has already been declared`，
+> 表现是 web boot 报 `dsh-mnemos: import failed`（其实是浏览器侧整包没跑起来）。
+> 修法：`;(function(){ ... })();` 包住全文，顶层只留这一条语句。
+
 ## 1. 分层
 
 ```
@@ -60,7 +67,7 @@
 | `bm25.mjs` | `createBm25` | 倒排索引 + BM25（k1=1.2, b=0.75）；`{add, remove, score, stats, has}` |
 | `metadata.mjs` | `createMetaIndex` | 元数据索引：`time` 展开成闭区间（支持 `2025`/`2025-04`/`2025-04-05`/ISO/区间对象），`place`/`person`/`object`/`topic` 做子串匹配 + 主题同义词扩展；`{add, remove, addAll, narrow, matchScore, size}` |
 | `vector.mjs` | `cosine` `createVector` | 向量通道：`status()` 三态探测（`on`/`off`/`degraded`）、`embed()`（512 条有界缓存、15s 超时、失败返回 `null`）、`cosineSearch()` |
-| `hybrid.mjs` | `DEFAULT_WEIGHTS` `MAX_RESULTS` `effectiveWeights` `rank` | 四路归一化加权融合（bm25 0.55 / meta 0.25 / vector 0.15 / heat 0.05），无向量通道时把 vector 的权重按比例分给其余三路；返回 `[{record, score, parts, partsNorm}]`，最多 50 条 |
+| `hybrid.mjs` | `DEFAULT_WEIGHTS` `MAX_RESULTS` `effectiveWeights` `rank` `moodScore` | 五路归一化加权融合（bm25 0.55 / meta 0.25 / vector 0.15 / heat 0.05 / mood 0），无向量通道时把 vector 的权重按比例分给其余三路；**情绪缺席时 mood 整份退出归一**（不是记 0 分），所以不开情绪的调用逐位等于接入前；mood 分量 = 强度 0.65×(arousal−0.3)/0.7 + 共振 0.35×(1−\|Δvalence\|/2)，共振要求两边都有明确正负号；返回 `[{record, score, parts, partsNorm}]`，最多 50 条 |
 
 ## 3. 数据流 · 写入
 
@@ -92,7 +99,8 @@
         ? vector.embed([query]) → cosineSearch / cosine(queryVec, docVec) → 0..1
         : 该路恒为 0，且 effectiveWeights 把 0.15 按比例分给其余三路
    → heatOf(record, now)                             → 0..1
-   → hybrid.rank({query, records, metaIndex, bm25, vectors, now})
+   → estimateEmotion(query)                          → 当轮心情（强度主导，共振只补一点）
+   → hybrid.rank({query, records, metaIndex, bm25, vectors, now, mood, weights:{mood: config.moodWeight}})
         每一路各自除以本批最大值归一化，再乘权重求和，clamp 到 0..1，按分数降序
    → budget.project(rows.map(r => r.record), {budget: injectTokenBudget, topN})
         persona/state 无条件进 picks；其余按分数顺序贪心装，装不下记 dropped('budget'|'topN'|'dup')

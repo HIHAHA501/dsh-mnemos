@@ -954,6 +954,11 @@ test("分层④：mem_write 支持显式 tier；非法值结构化报错且不�
   assert.equal(saved.tierSource, "user");
   const rendered = byName.get("mem_write").output.render({}, ok);
   assert.ok(rendered[0].text.includes("persona"));
+  const withMood = await byName.get("mem_write").execute({ text: "她说这件事让她特别开心" });
+  assert.equal(withMood.ok, true);
+  const savedMood = runtime.store.get(withMood.id);
+  assert.ok(savedMood.emotion.valence > 0.1, "带情绪词应给出正 valence，实际 " + savedMood.emotion.valence);
+  assert.ok(savedMood.emotion.arousal > 0.3, "有线索时 arousal 应高于中性基线，实际 " + savedMood.emotion.arousal);
   const before = runtime.store.all().length;
   const bad = await byName.get("mem_write").execute({ text: "这条不该落库", tier: "bogus" });
   assert.equal(bad.ok, false);
@@ -1197,6 +1202,32 @@ test("面板⑬：search 返回 rows（含 id/text/score/tier/pinned）", async 
   for (const key of ["id", "text", "score", "tier", "pinned"]) assert.ok(key in row, "缺 " + key);
   assert.equal(typeof row.score, "number");
   assert.ok(row.text.includes("年糕"));
+});
+
+test("面板⑬-b：universe 给出星与共享词面连线，形状固定、无自连", async (t) => {
+  const webServer = fakeWebServer();
+  const { runtime } = boot(t, {}, { services: { webServer } });
+  seed(runtime, { text: "用户养了一只叫年糕的橘猫" });
+  seed(runtime, { text: "年糕喜欢晒太阳，橘猫都这样" });
+  seed(runtime, { text: "她在做 mnemos 这个记忆插件" });
+  const result = await postPanel(webServer.routes[0].handler, { action: "universe" });
+  assert.equal(result.status, 200);
+  assert.equal(result.json.ok, true);
+  const stars = result.json.stars;
+  const links = result.json.links;
+  assert.equal(stars.length, 3);
+  for (const key of ["id", "text", "kind", "tier", "weight", "mentions", "pinned", "valence", "arousal", "at", "tags"]) {
+    assert.ok(key in stars[0], "缺 " + key);
+  }
+  assert.equal(typeof result.json.total, "number");
+  assert.equal(typeof result.json.truncated, "boolean");
+  const ids = stars.map((star) => star.id);
+  assert.ok(links.length >= 1, "共享「年糕/橘猫」的两条应连起来");
+  for (const pair of links) {
+    assert.ok(ids.includes(pair[0]) && ids.includes(pair[1]), "连线端点必须存在");
+    assert.notEqual(pair[0], pair[1], "不该有自连");
+  }
+  assert.equal(new Set(links.map((p) => p.join(":"))).size, links.length, "连线不该重复");
 });
 
 test("面板⑭：search 缺 query → 400", async (t) => {
@@ -2143,7 +2174,7 @@ test("过滤器 ⑫：会话 id 形态边界——短串/大写/带前缀都不�
 test("过滤器⑬：宿主 runtime-context 块（真实样本）不落库", (t) => {
   const { ctx, runtime } = boot(t, {});
   const listener = sessionListener(ctx);
-  const sample = "Current runtime context. This snapshot supersedes earlier runtime-context snapshots.\n\nCurrent working directory: \"/Users/tle/x\"";
+  const sample = "Current runtime context. This snapshot supersedes earlier runtime-context snapshots.\n\nCurrent working directory: \"/home/user/x\"";
   emitTurn(listener, USER_SID, 1, sample);
   assert.equal(runtime.store.all().length, 0);
   assert.equal(runtime.ingest.stats().filteredBy.hostContext, 1);

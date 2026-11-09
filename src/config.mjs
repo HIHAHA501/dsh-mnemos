@@ -25,6 +25,8 @@ export const CONFIG_DEFAULTS = Object.freeze({
   hotTokenBudget: 1200,
   injectTokenBudget: 600,
   topN: 6,
+  // 情绪分量在融合排序里的权重：0 等于关掉。默认给一个压不过词面匹配的小值
+  moodWeight: 0.15,
   vector: Object.freeze({
     enabled: "auto",
     provider: "none",
@@ -175,6 +177,7 @@ export function resolveConfig(input, options = {}) {
     hotTokenBudget: pickInt(source.hotTokenBudget, CONFIG_DEFAULTS.hotTokenBudget, { min: 0, max: 200000 }, "hotTokenBudget", warnings),
     injectTokenBudget: pickInt(source.injectTokenBudget, CONFIG_DEFAULTS.injectTokenBudget, { min: 0, max: 200000 }, "injectTokenBudget", warnings),
     topN: pickInt(source.topN, CONFIG_DEFAULTS.topN, { min: 0, max: 100 }, "topN", warnings),
+    moodWeight: pickNumber(source.moodWeight, CONFIG_DEFAULTS.moodWeight, { min: 0, max: 1 }, "moodWeight", warnings),
     vector: {
       enabled: pickEnum(vector.enabled, VECTOR_ENABLED, CONFIG_DEFAULTS.vector.enabled, "vector.enabled", warnings),
       provider: pickEnum(vector.provider, VECTOR_PROVIDERS, CONFIG_DEFAULTS.vector.provider, "vector.provider", warnings),

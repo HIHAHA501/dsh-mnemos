@@ -14,8 +14,24 @@
     "client.js",
     "cordis.patch.yml",
     "src",
-    "README.md"
+    "docs",
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE"
   ],
+  "scripts": {
+    "test": "node --test",
+    "preview": "node scripts/preview-panel.mjs"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/tletletle/dsh-mnemos.git"
+  },
+  "bugs": {
+    "url": "https://github.com/tletletle/dsh-mnemos/issues"
+  },
+  "homepage": "https://github.com/tletletle/dsh-mnemos#readme",
+  "author": "tletletle",
   "dsh": {
     "bundle": {
       "patch": "./cordis.patch.yml"

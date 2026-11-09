@@ -6,6 +6,7 @@
  * 形状与 defineTool 的产物逐字段一致：{name, description, parameters, output:{schema, render}, execute}。
  */
 
+import { estimateEmotion } from "../emotion.mjs";
 import { createRecord, TIERS } from "../record.mjs";
 import { rankRecords } from "./inject.mjs";
 
@@ -147,10 +148,13 @@ function writeTool(deps) {
       const now = typeof deps.now === "function" ? deps.now() : Date.now();
       let record;
       try {
+        const safeText = clip(text, 2000);
         record = createRecord(
           {
             kind: typeof (args && args.kind) === "string" ? args.kind : "fact",
-            text: clip(text, 2000),
+            text: safeText,
+            // 显式写入也带情绪：情绪分量读不到它，这条记忆就永远拿不到「强度」分
+            emotion: estimateEmotion(safeText),
             weight: 0.7,
             mentions: 1,
             createdAt: now,

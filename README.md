@@ -7,34 +7,48 @@ DSH 的本地长期记忆插件：把对话里值得留下的东西写成记录�
 
 | 部分 | 状态 | 依据 |
 | --- | --- | --- |
-| 核心层 `src/*.mjs` | ✅ 单测全绿 32 例 | `node --test 'test/core/*.test.mjs'` |
-| 检索层 `src/retrieval/*.mjs` | ✅ 单测全绿 40 例 | `node --test 'test/retrieval/*.test.mjs'` |
-| 宿主接线层 `index.mjs` + `src/host/*` | ✅ 单测全绿 33 例（接线层任务交付） | `node --test 'test/host/*.test.mjs'` |
-| 浏览器面板 `client.js` | ✅ 单测全绿 25 例；⚠️ 没在真实浏览器里渲染过 | `node --test 'test/client/*.test.mjs'` |
-| 面板路由 `/.dsh-mnemos/panel` | ✅ GET 200（stats/budget/vector/recalls）＋ POST 动作（search / forget / pin / tier）；非本机 403、缺 `x-dsh-mnemos` 头 400、body > 8KB 413 | 假 webServer 探针 + 201 例测试；非本机实装 |
-| 验收夹具 `fixtures/*.json` | ✅ 16 条召回断言全绿 | 用交付的 bm25/metadata/hybrid 实跑，见「夹具」一节 |
-| 向量通道（local / api） | ❌ **从未跑通过真实请求** | 全仓库没有任何代码设置 `globalThis.__dshMnemosOnnx`，只有 `vector.mjs` 在读 |
-| 安装进本机 profile | ✅ **已装**（`desktop` profile，22 个文件与仓库逐文件 shasum 一致，`import('dsh-mnemos')` 返回 `name`/`apply`/`PANEL_PATH`） | `scripts/install.mjs --install`，备份 `package.json.mnemos-backup-*` |
-| 宿主进程内加载 / 浏览器内渲染 | ❌ **未验证**（要重启宿主才加载；重启前 `/.dsh-mnemos/panel` 应为 404） | 重启后按「面板」一节自验 |
+| 全部 349 个测试 | ✅ 全绿 | `node --test`（零运行时依赖，不需要 install） |
+| 宿主进程内加载 | ✅ 已验证（本机 `desktop` profile 长期挂着跑） | `/.dsh-mnemos/panel` 返回 200 |
+| 浏览器内渲染 | ✅ 已验证（设置页「记忆星图」的真实 UI） | 概览 / 星图 / 说明三个页签 |
+| 人格同步（persona） | ✅ 已验证（对接 dsh-persona-dafeiyu，含相对路径解析与节流） | `/api/dsh-persona-dafeiyu/status` → 快照写入并原地更新 |
+| 情绪分量（强度 + 共振） | ✅ 已验证（没有 mood 时整份退出归一，老分值逐位不变） | 321 条老测试未改而全绿 |
+| 记忆星图 | ✅ 已验证（三维球壳 + 投影 + 预渲染贴图 + 未点亮空位） | 抽出绘制函数单独渲染截图核对 |
+| 向量通道（local / api） | ❌ **从未跑通过真实请求** | 全仓库没有代码设置 `globalThis.__dshMnemosOnnx`，只有 `vector.mjs` 在读 |
+| Windows 上的行为 | ❓ **未验证** | CI 在 `ubuntu` / `windows` / `macos` 三个 runner 各跑一遍；我本地只有 macOS |
 
 ### 验证状态分成三档（不美化）
 
-- **已在本机真实环境验证的：安装与落盘。** 插件已装进 `desktop` profile 的 `node_modules/dsh-mnemos`，
-  22 个文件与仓库逐文件 shasum 一致；从 profile 目录 `import('dsh-mnemos')` 能拿到 `name`/`apply`/`PANEL_PATH`。
-  但**宿主进程内加载**没验过——插件由宿主在启动时按 `dsh.profile.bundles` 加载，本次只装未重启。
-- **仅单测 / 探针验证的**：核心层、检索层、宿主接线层、浏览器半边的逻辑与降级路径，共 130 例；
-  面板路由的 200 / 405 / 403 由接线层任务用假 `webServer` 探针验过。
-- **完全没验证的**：浏览器内实际渲染、宿主进程内加载、向量通道的真实推理（local 与 api 都没发过一次请求）。
+- **真实环境验证过的**：宿主内加载、面板路由、浏览器内渲染、人格同步、星图绘制管线。
+- **仅单测验证的**：核心层、检索层、宿主接线层的逻辑与降级路径，以及浏览器半边的纯函数。
+- **仍然没验证的**：向量通道的真实推理（local 与 api 都没发过一次请求）；Windows 上的行为。
 
 ## 安装
 
 ### 前置
 
-- Node >= 22。本机 PATH 里没有 `node`，用绝对路径：
-  `/Users/tle/.dsh/dsh-runtimes/dsh-primary-runtime/dependencies/node/bin/node`
+- Node >= 22。若 PATH 里没有 `node`，用宿主自带的绝对路径（把 `<DSH_HOME>` 换成你的 `~/.dsh`）：
+  - macOS / Linux：`<DSH_HOME>/dsh-runtimes/dsh-primary-runtime/dependencies/node/bin/node`
+  - Windows：`<DSH_HOME>\\dsh-runtimes\\dsh-primary-runtime\\dependencies\\node\\node.exe`
 - 一个可写的 DSH profile 目录，默认 `$DSH_HOME/profiles/<profile>/`（`DSH_HOME` 默认 `~/.dsh`）。
 
-### 路径 0：仓库自带脚本（已实测，推荐）
+### 路径 A：从 GitHub 装（公开分发）
+
+```bash
+# 固定版本（推荐：可复现，升级时改 tag）
+dsh plugin add github:tletletle/dsh-mnemos#v0.1.0
+
+# 跟主干（拿到最新提交，但不可复现）
+dsh plugin add github:tletletle/dsh-mnemos
+```
+
+这是 pnpm 的 GitHub 依赖语法，`dsh plugin add` 只是包一层。不想用 CLI 的话，直接编辑
+`$DSH_HOME/profiles/<profile>/package.json`：`dependencies` 里加这一行，`dsh.profile.bundles` 里加
+`"dsh-mnemos"`，然后在该目录跑一次 `pnpm install`，最后重启宿主。
+
+**升级** = 换 tag 再装一次，然后重启宿主。本插件没有自更新按钮——那是查 npm registry 的机制，
+而本项目只发 GitHub（理由见 `CHANGELOG.md`）。
+
+### 路径 0：仓库自带脚本（本机开发，已实测）
 
 ```bash
 node scripts/install.mjs --check      # 只读四件事诊断：bundles / dependencies / node_modules / import
@@ -156,6 +170,7 @@ rm -rf ~/.dsh/profiles/desktop/dsh-mnemos
 | `hotTokenBudget` | int 0..200000 | `1200` | 「热记忆」段落最多占多少 token |
 | `injectTokenBudget` | int 0..200000 | `600` | 单轮检索结果注入的上限 |
 | `topN` | int 0..100 | `6` | 单轮最多挑几条记忆 |
+| `moodWeight` | number 0..1 | `0.15` | 情绪分量在融合排序里的权重，`0` 等于关掉。分量内部：强度（当时 arousal）占 0.65，共振（与你当轮心情同向）占 0.35 |
 | `vector.enabled` | `auto` \| `off` \| `on` | `auto` | 探到配置齐全才开 |
 | `vector.provider` | `none` \| `local` \| `api` | `none` | 见下方「降级矩阵」 |
 | `vector.model` | string \| null | `null` | local 时是模型文件路径；api 时是模型名 |
@@ -353,8 +368,9 @@ $ node -e "import('./fixtures/recall-cases.json', { with: { type: 'json' } }).th
 cases: 6
 ```
 
-本机 PATH 里没有 `node` 时，把上面的 `node` 换成
-`/Users/tle/.dsh/dsh-runtimes/dsh-primary-runtime/dependencies/node/bin/node`。
+PATH 里没有 `node` 时，把上面的 `node` 换成宿主自带的那个：
+macOS/Linux 是 `<DSH_HOME>/dsh-runtimes/dsh-primary-runtime/dependencies/node/bin/node`，
+Windows 是 `<DSH_HOME>\\dsh-runtimes\\dsh-primary-runtime\\dependencies\\node\\node.exe`。
 
 ## 插件给你的命令与工具
 
@@ -419,6 +435,8 @@ console.log(rows.slice(0, 3).map((r) => r.record.id + "@" + r.score.toFixed(3)))
 | 条件 | 行为 | 出处 |
 | --- | --- | --- |
 | `vector.provider: none`（默认） | `status() = {state:'off', reason:'provider-none'}`；检索只用 bm25+meta+heat，vector 的 0.15 权重按比例分给其余三路 | `vector.mjs:134`, `hybrid.mjs:15` |
+| 调用方没给 `mood`（或 `moodWeight: 0`） | 情绪分量**整份退出归一**，不是记 0 分；四路权重与接入前逐位相同，排序结果不变 | `hybrid.mjs` `effectiveWeights(weights, hasVector, hasMood)` |
+| 记录没有 `emotion` 或停在 `arousal 0.3` 中性基线 | 该条强度分为 0；共振还要求两边都有明确正负号，所以「没表态」不会被当成「和你一样」 | `hybrid.mjs` `moodScore` |
 | `vector.enabled: off` | `{state:'off', reason:'disabled-by-config'}` | `vector.mjs:135` |
 | `provider: api` 缺 endpoint | `{state:'degraded', reason:'api:no-endpoint'}`，本批不参与向量路 | `vector.mjs:142` |
 | `provider: api` 缺密钥 | `{state:'degraded', reason:'api:no-api-key:<ENV名>'}` | `vector.mjs:143` |

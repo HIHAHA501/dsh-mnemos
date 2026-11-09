@@ -10,6 +10,10 @@
  * 构图节奏：星幕（主角）-> 手绘首卡（重）-> 分层（中）-> 预算（中）-> 向量/召回（轻）。
  * 装饰随便画，数据图形一律由 {stats,budget,vector,recalls} 真实字段驱动。
  */
+/* __clientScopeGuard: 宿主把所有插件的 client.js 拼进同一个脚本作用域，
+   顶层 const/function 会互相撞名（实测：dsh-safeguard 与 dsh-mnemos 的 PANEL_PATH 相撞，
+   导致 web boot 报 “Identifier has already been declared”）。整份文件包一层 IIFE 隔离。 */
+(function () {
 const PANEL_PATH = (() => {
   try {
     return new URL(".dsh-mnemos/panel", document.baseURI).pathname;
@@ -28,6 +32,28 @@ const RECALL_LIMIT = 5;
 const FETCH_TIMEOUT_MS = 8000;
 const STAR_MAX_NODES = 40;
 const STAR = { W: 560, H: 112, R_MIN: 3, R_MAX: 9, TOP: 20, BOTTOM: 74 };
+const TAU = Math.PI * 2;
+/** 星图：画布尺寸与布局松弛的全部参数都写死——同一份数据每次画在同一处，截图可复现。 */
+const STARMAP = {
+  W: 520,
+  H: 300,
+  PAD: 24,
+  R_MIN: 2,
+  R_MAX: 18,
+  SHELL: 0.42, // 球壳外半径 = 画布短边 × 0.42
+  PITCH: -0.35, // 固定俯仰角：把球压出纵深
+  FOCUS_LEN: 4, // 透视焦距 = 球壳半径 × 4
+  ANCHOR_BASE: 40,
+  ANCHOR_BONUS: 4, // 锚点星 40 + 4×权重 → 40~44
+  CHAMPION: 1.6, // 每层权重最高的一颗（章首星）
+  DEPTH_MIN: 0.68, // 最远的星剩 0.68 的亮度与半径，别暗成黑点
+  UNLIT_MAX: 44,
+  UNLIT_BASE: 16,
+  UNLIT_HUE: 218,
+  SPRITE: 64,
+};
+/** 空闲停帧：设置页常被一直开着，画面不动就别占着 CPU；有指针活动再醒。 */
+const STARMAP_IDLE_MS = 10000;
 
 let RESOLVED_REACT = null;
 
@@ -354,6 +380,16 @@ S.pill = {
 S.pillDot = { width: 6, height: 6, borderRadius: 999, flex: "none" };
 S.captureRow = { display: "flex", alignItems: "center", gap: 10, paddingBottom: 2 };
 S.actErr = { fontSize: 11, color: C.danger, paddingLeft: 38 };
+// 星图画布：宽跟着设置页走、高写死；底色由 canvas 自己铺满，抽出去单独截图也不发白
+S.starmapCanvas = {
+  display: "block",
+  width: "100%",
+  height: STARMAP.H,
+  borderRadius: 14,
+  border: "1px solid hsla(320, 55%, 82%, 0.16)",
+  cursor: "crosshair",
+};
+S.starmapDetail = { display: "flex", flexWrap: "wrap", alignItems: "baseline", gap: 8, fontSize: 12 };
 
 function fillBar(pct, tone) {
   const k = tone === undefined ? 0.15 : tone;
@@ -689,6 +725,8 @@ const EMPTY_CAPTURE = {
   note: "",
 };
 const EMPTY_ACTIONS = { query: "", rows: [], rowStatus: {}, confirmingId: "", searchStatus: null, capture: EMPTY_CAPTURE };
+/** 星图初始态：idle 表示「还没问过宿主」，切到星图页才发第一次 universe。 */
+const EMPTY_STARMAP = { status: "idle" };
 
 /**
  * 唯一的写入出口。两个必带请求头缺一个宿主就 400，所以这里写死；
@@ -1311,7 +1349,7 @@ function renderSegments(active, onSelect, h) {
       },
       label,
     );
-  return h("div", { key: "segments", role: "tablist", style: S.segGroup }, [seg("overview", "概览"), seg("about", "说明")]);
+  return h("div", { key: "segments", role: "tablist", style: S.segGroup }, [seg("overview", "概览"), seg("starmap", "星图"), seg("about", "说明")]);
 }
 
 /** 说明页：只用面板已有的小标题 + 正文排版，不新造一套组件风格。 */
@@ -1363,18 +1401,634 @@ function renderAbout(h) {
   ];
 }
 
+/* --------------------------------------------------------------- 星图 */
+
+/** valence -> 色相：正=暖橙 28°，负=冷蓝 215°，接近 0 落在灰青 190°。 */
+function starHue(valence) {
+  const v = clampNum(valence, -1, 1);
+  return Math.round(v >= 0 ? 190 - 162 * v : 190 + 25 * -v);
+}
+/** 饱和度随 |valence| 上升：情绪淡就接近灰，情绪浓才认得出颜色。 */
+function starSat(valence) {
+  return Math.round(14 + 46 * Math.abs(clampNum(valence, -1, 1)));
+}
+/** 大小按正文长度对数压缩，再乘权重：文字越多越大，但不让一条长文撑爆画面。 */
+function starRadius(star) {
+  const s = asObject(star);
+  const text = typeof s.text === "string" ? s.text.length : 0;
+  const weight = clampNum(s.weight, 0, 1);
+  const base = (2 + Math.min(9, Math.log10(1 + text) * 4.4) * 1.6) * (0.85 + 0.3 * weight);
+  return Math.round(clampNum(base, STARMAP.R_MIN, STARMAP.R_MAX) * 10) / 10;
+}
 /**
- * 渲染入口。opts.tab：overview / about；不给时按「无 hooks」处理，顺序渲染两页。
+ * arousal 0.3 是「平常」（0.55），1.0 是「很亮」（1.0），0 是昏暗但看得见（0.30）。
+ * 和空位星的分辨不靠 alpha（空位是 0.20~0.30，会重叠），靠 r 与 sat。
+ */
+function starAlpha(arousal) {
+  const k = clampNum((clampNum(arousal, 0, 1) - 0.3) / 0.7, -1, 1);
+  // 地板 0.5 而不是 0.3：最平淡的真实记忆乘上 DEPTH_MIN 0.68 也有 0.34，
+  // 永远明显亮于空位的 0.20~0.30 —— 真实星不会被误看成「未点亮」。
+  return Math.round(clampNum(0.55 + 0.45 * k, 0.5, 1) * 100) / 100;
+}
+/** 呼吸相位取自 id：同一颗星每次都停在同一个相位上，截图与测试才可复现。 */
+function starPhase(id) {
+  return Math.round(((hash32(String(id)) % 6283) / 1000) * 1000) / 1000;
+}
+
+/**
+ * 空位数量：记忆少的时候补一层「还没点亮」的空位星，免得一片空。
+ * 16 条真实记忆时满 44 个，越多越少，60 条起归零——只看条数，可复现。
+ */
+function unlitCount(realStars) {
+  const real = asCount(realStars);
+  return Math.round(clampNum(STARMAP.UNLIT_MAX - Math.max(0, real - STARMAP.UNLIT_BASE), 0, STARMAP.UNLIT_MAX));
+}
+
+/**
+ * 空位星的形状：更小、更暗、灰蓝、不连线。全部由 hash32(索引) 定，
+ * 不用随机数，所以同一份数据每次摆在同一处。
+ */
+function unlitStars(count) {
+  const n = Math.round(clampNum(count, 0, STARMAP.UNLIT_MAX));
+  const out = [];
+  for (let i = 0; i < n; i += 1) {
+    const jitter = hash32("unlit:" + i);
+    out.push({
+      id: "unlit-" + i,
+      r: Math.round((1.2 + ((jitter >>> 3) % 11) / 10) * 10) / 10,
+      alpha: Math.round((0.2 + ((jitter >>> 7) % 11) / 100) * 100) / 100,
+      sat: 8 + ((jitter >>> 11) % 9),
+      phase: ((jitter >>> 13) % 6283) / 1000,
+    });
+  }
+  return out;
+}
+
+/** 这颗是不是空位：看 id 前缀，布局返回的 unlitIds 只放空位。 */
+function starmapIsUnlit(layout, id) {
+  const ids = layout && Array.isArray(layout.unlitIds) ? layout.unlitIds : [];
+  return ids.indexOf(String(id || "")) >= 0;
+}
+
+/**
+ * 校验宿主回包。形状不对就整页当失败——半份数据会画出半张真的星图，比不画更糟。
+ * @param {object} body postAction 的返回体。
+ */
+function normalizeUniverse(body) {
+  const payload = asObject(body);
+  if (payload.ok === false) {
+    return { status: "error", error: typeof payload.error === "string" && payload.error ? payload.error : "宿主返回失败" };
+  }
+  if (!Array.isArray(payload.stars) || !Array.isArray(payload.links)) {
+    return { status: "error", error: "星图数据结构不对：缺少 stars / links" };
+  }
+  const stars = [];
+  const known = new Set();
+  for (const row of payload.stars) {
+    const s = asObject(row);
+    const id = typeof s.id === "string" || typeof s.id === "number" ? String(s.id) : "";
+    if (!id || known.has(id)) continue;
+    known.add(id);
+    stars.push({
+      id,
+      text: typeof s.text === "string" ? s.text : "",
+      kind: typeof s.kind === "string" ? s.kind : "",
+      tier: typeof s.tier === "string" ? s.tier : "",
+      weight: clampNum(s.weight, 0, 1),
+      mentions: asCount(s.mentions),
+      pinned: s.pinned === true,
+      valence: Number.isFinite(Number(s.valence)) ? clampNum(s.valence, -1, 1) : 0,
+      arousal: Number.isFinite(Number(s.arousal)) ? clampNum(s.arousal, 0, 1) : 0.3,
+      at: Number.isFinite(Number(s.at)) ? Number(s.at) : 0,
+      tags: asList(s.tags).filter((tag) => typeof tag === "string" && tag.trim()).slice(0, 3),
+    });
+  }
+  // 线只留两端都在场上、且不是自连的对；无向，重复的并掉
+  const links = [];
+  const seen = new Set();
+  for (const pair of payload.links) {
+    if (!Array.isArray(pair) || pair.length < 2) continue;
+    const a = String(pair[0]);
+    const b = String(pair[1]);
+    if (a === b || !known.has(a) || !known.has(b)) continue;
+    const key = a < b ? a + "|" + b : b + "|" + a;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    links.push([a, b]);
+  }
+  return {
+    status: stars.length ? "ready" : "empty",
+    stars,
+    links,
+    total: asCount(payload.total) || stars.length,
+    truncated: payload.truncated === true,
+  };
+}
+
+function compareText(a, b) {
+  return a < b ? -1 : a > b ? 1 : 0;
+}
+
+/** 每层占球壳的哪一段（外半径的比例）：人格前提与热记忆靠内，冷记忆靠外。 */
+const STARMAP_BANDS = {
+  persona: [0.02, 0.3],
+  hot: [0.12, 0.62],
+  state: [0.26, 0.8],
+  cold: [0.45, 1],
+};
+function starmapBand(tier) {
+  return STARMAP_BANDS[tier] || [0.4, 0.9];
+}
+
+/**
+ * id 当 FNV-1a 种子，生成一个单位球面方向：同一颗星永远是同一个方向，重绘不乱跳。
+ * 思路参考 dsh-xingxi (Yuuyuko-uu)。
+ */
+function starmapDirection(id) {
+  let seed = hash32(String(id) || "star");
+  const next = () => {
+    seed = (seed + 0x6d2b79f5) >>> 0;
+    let t = seed;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+  const y = next() * 2 - 1;
+  const angle = next() * TAU;
+  const ring = Math.sqrt(Math.max(0, 1 - y * y));
+  return { x: ring * Math.cos(angle), y: y, z: ring * Math.sin(angle) };
+}
+
+/**
+ * 球面 -> 画布：先绕 Y 轴转，再按俯仰角压扁，最后做透视缩放，返回屏幕坐标与深度。
+ * 思路参考 dsh-xingxi (Yuuyuko-uu)。
+ */
+function projectSphere(x, y, z, yaw, pitch, focusLen, w, hgt) {
+  const c1 = Math.cos(yaw);
+  const s1 = Math.sin(yaw);
+  const x1 = x * c1 + z * s1;
+  const z1 = -x * s1 + z * c1;
+  const c2 = Math.cos(pitch);
+  const s2 = Math.sin(pitch);
+  const y2 = y * c2 - z1 * s2;
+  const z2 = y * s2 + z1 * c2;
+  const k = focusLen / (focusLen + z2);
+  return { x: w / 2 + x1 * k, y: hgt / 2 + y2 * k, z: z2 };
+}
+
+/**
+ * 立方根插值：半径按体积均匀铺开，不然点会全挤在球心附近。
+ * 思路参考 dsh-xingxi (Yuuyuko-uu)。
+ */
+function shellRadius(rIn, rOut, t) {
+  const k = clampNum(t, 0, 1);
+  return Math.cbrt(rIn * rIn * rIn + (rOut * rOut * rOut - rIn * rIn * rIn) * k);
+}
+
+/**
+ * 三维球壳布局：方向由 id 哈希定，所在层的半径区间由 tier 定，
+ * 层内按时间从内到外铺开；钉住/人格前提里权重最高的一颗固定在原点当中心亮核。
+ * 投影一次到画布坐标，深度压进 alpha 与 r（节点仍然只有那七个字段），
+ * 深度另放 depth 数组给测试与焦点用。不用力导向，也不用随机数。
+ */
+function layoutUniverse(stars, rawLinks, width, height) {
+  const w = width > 0 ? width : STARMAP.W;
+  const hgt = height > 0 ? height : STARMAP.H;
+  const list = asList(stars).filter((s) => s && s.id);
+  const n = list.length;
+  // 一条真实记忆都没有时是空状态页：那时不该补空位，也不该画空壳
+  if (!n) return { nodes: [], ids: [], links: [], unlitIds: [], depth: [], anchor: -1 };
+  const shell = Math.max(36, Math.min(w, hgt) * STARMAP.SHELL);
+  const focusLen = shell * STARMAP.FOCUS_LEN;
+  // 画布是宽的：球壳在横向拉一点，星图才不至于缩在中间一条
+  const stretch = clampNum(w / hgt, 1, 1.6);
+
+  const ids = new Array(n);
+  const index = new Map();
+  for (let i = 0; i < n; i += 1) {
+    ids[i] = String(list[i].id);
+    index.set(ids[i], i);
+  }
+  const links = [];
+  for (const pair of asList(rawLinks)) {
+    if (!Array.isArray(pair) || pair.length < 2) continue;
+    const a = index.get(String(pair[0]));
+    const b = index.get(String(pair[1]));
+    if (a === undefined || b === undefined || a === b) continue;
+    links.push([a, b]);
+  }
+
+  // 锚点星：钉住的或人格前提里权重最高的一颗，坐在球心当核心
+  let anchor = -1;
+  for (let i = 0; i < n; i += 1) {
+    const star = list[i];
+    if (!(star.pinned === true || star.tier === "persona")) continue;
+    if (anchor < 0 || clampNum(star.weight, 0, 1) > clampNum(list[anchor].weight, 0, 1)) anchor = i;
+  }
+
+  // 分层的成员：同层按时间从早到晚 -> 半径从内到外
+  const groups = new Map();
+  for (let i = 0; i < n; i += 1) {
+    if (i === anchor) continue;
+    const tier = typeof list[i].tier === "string" ? list[i].tier : "";
+    if (!groups.has(tier)) groups.set(tier, []);
+    groups.get(tier).push(i);
+  }
+  const radiusOf = new Float64Array(n);
+  for (const [tier, members] of groups) {
+    members.sort((a, b) => Number(list[a].at || 0) - Number(list[b].at || 0) || compareText(ids[a], ids[b]));
+    const band = starmapBand(tier);
+    const rIn = shell * band[0];
+    const rOut = shell * band[1];
+    const m = members.length;
+    for (let k = 0; k < m; k += 1) {
+      radiusOf[members[k]] = shellRadius(rIn, rOut, m === 1 ? 0.5 : k / (m - 1));
+    }
+  }
+
+  // 每层权重最高的一颗放大一档（章首星）
+  const champion = new Set();
+  for (const [, members] of groups) {
+    let best = -1;
+    for (const i of members) {
+      if (best < 0 || clampNum(list[i].weight, 0, 1) > clampNum(list[best].weight, 0, 1)) best = i;
+    }
+    if (best >= 0) champion.add(best);
+  }
+
+  const rawX = [];
+  const rawY = [];
+  const meta = [];
+  const depth = [];
+  for (let i = 0; i < n; i += 1) {
+    const star = list[i];
+    const dir = starmapDirection(ids[i]);
+    const radius = i === anchor ? 0 : radiusOf[i];
+    const at = projectSphere(dir.x * radius, dir.y * radius, dir.z * radius, 0, STARMAP.PITCH, focusLen, w, hgt);
+    // far: 0 在最前，1 在最后。深度同时压 alpha 与半径
+    const far = clampNum((at.z / shell + 1) / 2, 0, 1);
+    const keep = 1 - (1 - STARMAP.DEPTH_MIN) * far;
+    let r;
+    let alpha;
+    if (i === anchor) {
+      r = Math.round((STARMAP.ANCHOR_BASE + STARMAP.ANCHOR_BONUS * clampNum(star.weight, 0, 1)) * 10) / 10;
+      alpha = 1;
+    } else {
+      const size = starRadius(star) * (champion.has(i) ? STARMAP.CHAMPION : 1);
+      // 下限 2.6：2.4 以下留给空位，绘制函数靠 r 与 sat 一眼分开两者
+      r = Math.round(clampNum(size * keep, 2.6, STARMAP.R_MAX) * 10) / 10;
+      alpha = Math.round(clampNum(starAlpha(star.arousal) * keep, 0.17, 1) * 100) / 100;
+    }
+    // 同一种情绪的星不能长得一模一样：用 id 哈希把饱和度抖 ±10%。
+    // 明度不抖——它已经被「深度 × 情绪」占满，再抖就把「远=暗」这条语义搅浑了。
+    const jitter = ((hash32(ids[i] + ":sat") % 21) - 10) / 100;
+    rawX.push(w / 2 + (at.x - w / 2) * stretch);
+    rawY.push(at.y);
+    meta.push({
+      r,
+      hue: starHue(star.valence),
+      sat: Math.round(clampNum(starSat(star.valence) * (1 + jitter), 0, 100)),
+      alpha,
+      phase: starPhase(ids[i]),
+    });
+    depth.push(Math.round(at.z * 100) / 100);
+  }
+
+  // 空位：最外层球壳上的灰蓝小点，照旧不连线、不参与 stats
+  const extra = unlitStars(unlitCount(n));
+  const unlitIds = [];
+  for (let k = 0; k < extra.length; k += 1) {
+    const item = extra[k];
+    const dir = starmapDirection(item.id);
+    const dist = shell * (1.15 + 0.15 * ((hash32(item.id + ":shell") % 100) / 100));
+    const at = projectSphere(dir.x * dist, dir.y * dist, dir.z * dist, 0, STARMAP.PITCH, focusLen, w, hgt);
+    ids.push(item.id);
+    unlitIds.push(item.id);
+    rawX.push(w / 2 + (at.x - w / 2) * stretch);
+    rawY.push(at.y);
+    meta.push({ r: item.r, hue: STARMAP.UNLIT_HUE, sat: item.sat, alpha: item.alpha, phase: item.phase });
+    depth.push(Math.round(at.z * 100) / 100);
+  }
+
+  // 撑满画布：按真实星的包围盒分轴缩放（围绕球心，锚点星不动）。
+  // 分轴是因为画布本来就宽：等比会被高度卡住，星空还是只占中间一条。
+  // 上界 2.4 免得寥寥几条记忆被放大成几颗巨球；下界 0.6。
+  let maxDx = 0;
+  let maxDy = 0;
+  for (let i = 0; i < n; i += 1) {
+    maxDx = Math.max(maxDx, Math.abs(rawX[i] - w / 2));
+    maxDy = Math.max(maxDy, Math.abs(rawY[i] - hgt / 2));
+  }
+  const fitX = clampNum(maxDx > 0 ? (w / 2 - STARMAP.PAD) / maxDx : 1, 0.6, 2.4);
+  const fitY = clampNum(maxDy > 0 ? (hgt / 2 - STARMAP.PAD) / maxDy : 1, 0.6, 2.4);
+  const nodes = [];
+  for (let i = 0; i < meta.length; i += 1) {
+    nodes.push({
+      x: Math.round((w / 2 + (rawX[i] - w / 2) * fitX) * 10) / 10,
+      y: Math.round((hgt / 2 + (rawY[i] - hgt / 2) * fitY) * 10) / 10,
+      r: meta[i].r,
+      hue: meta[i].hue,
+      sat: meta[i].sat,
+      alpha: meta[i].alpha,
+      phase: meta[i].phase,
+    });
+  }
+  return { nodes, ids, links, unlitIds, depth, anchor };
+}
+
+/* @starmap-start */
+/**
+ * 一帧星图：只认 ctx / nodes / opts，抽出去单放一块画布也能画。
+ * opts = { time, links, width, height, sprite, focus }
+ *   time   毫秒；0 是确定的静止图（视觉验收取这一帧）
+ *   sprite 预渲染好的星点贴图；没有就回落到逐颗径向渐变
+ *   focus  聚焦的真实星下标（hover），-1 表示没有
+ */
+function drawStarmapFrame(ctx, nodes, opts) {
+  const o = opts || {};
+  const list = Array.isArray(nodes) ? nodes : [];
+  const width = Number(o.width) > 0 ? Number(o.width) : 1;
+  const height = Number(o.height) > 0 ? Number(o.height) : 1;
+  const time = Number(o.time) > 0 ? Number(o.time) : 0;
+  const links = Array.isArray(o.links) ? o.links : [];
+  const sprite = o.sprite && Number(o.sprite.width) > 0 ? o.sprite : null;
+  const focus = Number.isFinite(Number(o.focus)) ? Math.round(Number(o.focus)) : -1;
+  const turn = Math.PI * 2;
+
+  const sky = ctx.createLinearGradient(0, 0, width, height);
+  sky.addColorStop(0, "#2b2139");
+  sky.addColorStop(1, "#171327");
+  ctx.fillStyle = sky;
+  ctx.fillRect(0, 0, width, height);
+
+  // 每颗星各飘各的：位移只有 2px 量级，构图不动，记住的那颗星一直在原处。
+  // 空位只飘一半，别让暗点抢注意力。相位来自节点自己的 phase，所以是确定的。
+  const px = [];
+  const py = [];
+  for (let i = 0; i < list.length; i += 1) {
+    const node = list[i] || {};
+    const phase = Number(node.phase) || 0;
+    const dark = (Number(node.r) || 0) <= 2.4 && (Number(node.sat) || 0) <= 16;
+    px.push((Number(node.x) || 0) + (dark ? 1.1 : 2.2) * Math.sin(time * 0.0007 + phase));
+    py.push((Number(node.y) || 0) + (dark ? 0.9 : 1.8) * Math.cos(time * 0.0009 + phase));
+  }
+
+  // 焦点：自己与相连的星保持亮度，其余压暗；空位不参与（本来就暗）
+  let lit = null;
+  if (focus >= 0 && focus < list.length) {
+    lit = new Set();
+    lit.add(focus);
+    for (let k = 0; k < links.length; k += 1) {
+      const pair = links[k];
+      if (!pair || pair.length < 2) continue;
+      if (pair[0] === focus) lit.add(pair[1]);
+      else if (pair[1] === focus) lit.add(pair[0]);
+    }
+  }
+
+  // 暗线：透明度随距离平方衰减，有焦点时不相干的线更淡
+  const reach = Math.max(90, Math.max(width, height) * 0.62);
+  ctx.lineWidth = 0.7;
+  for (let k = 0; k < links.length; k += 1) {
+    const pair = links[k];
+    if (!pair || pair.length < 2) continue;
+    const a = pair[0];
+    const b = pair[1];
+    if (!(a >= 0 && a < list.length && b >= 0 && b < list.length) || a === b) continue;
+    const dx = px[a] - px[b];
+    const dy = py[a] - py[b];
+    const fall = 1 - Math.sqrt(dx * dx + dy * dy) / reach;
+    if (!(fall > 0)) continue;
+    const na = list[a] || {};
+    const nb = list[b] || {};
+    const bright = Math.min(1, Math.max(0, ((Number(na.alpha) || 0.55) + (Number(nb.alpha) || 0.55)) / 2));
+    let alpha = 0.2 * fall * fall * (0.45 + 0.55 * bright);
+    if (lit && !(lit.has(a) && lit.has(b))) alpha *= 0.35;
+    ctx.strokeStyle = "rgba(206,194,232," + alpha.toFixed(3) + ")";
+    ctx.beginPath();
+    ctx.moveTo(px[a], py[a]);
+    ctx.lineTo(px[b], py[b]);
+    ctx.stroke();
+  }
+
+  for (let i = 0; i < list.length; i += 1) {
+    const node = list[i] || {};
+    const x = px[i];
+    const y = py[i];
+    const r = Math.max(0.6, Number(node.r) || 1);
+    const hue = Number.isFinite(Number(node.hue)) ? Number(node.hue) : 190;
+    const sat = Number.isFinite(Number(node.sat)) ? Number(node.sat) : 18;
+    const base = Math.min(1, Math.max(0.08, Number(node.alpha) || 0.55));
+    const phase = Number(node.phase) || 0;
+    // 空位：比真实星都小、几乎不发色的灰蓝点，不画白热核心（真实星 r 下限 2.6）
+    const dim = r <= 2.4 && sat <= 16;
+    const alpha = dim || !lit || lit.has(i) ? base : base * 0.45;
+    // 呼吸：半径 ±14%，空位只有一半，周期都拉到分钟级
+    const breath = dim ? 0.93 + 0.07 * Math.sin(time * 0.0012 + phase) : 0.86 + 0.14 * Math.sin(time * 0.0012 + phase);
+    const size = r * breath;
+
+    if (dim) {
+      ctx.fillStyle = "hsla(" + hue + "," + sat + "%,74%," + Math.min(1, alpha * 0.9).toFixed(3) + ")";
+      ctx.beginPath();
+      ctx.arc(x, y, size, 0, turn);
+      ctx.fill();
+      continue;
+    }
+
+    // 光晕：r 就是这团光的半径（贴图自带软边），有贴图就盖，没有就现建径向渐变
+    if (sprite) {
+      ctx.globalAlpha = Math.min(1, alpha * breath);
+      ctx.drawImage(sprite, x - size, y - size, size * 2, size * 2);
+      ctx.globalAlpha = 1;
+    } else {
+      const glow = ctx.createRadialGradient(x, y, 0, x, y, Math.max(0.6, size));
+      glow.addColorStop(0, "hsla(" + hue + "," + sat + "%,80%," + (0.62 * alpha * breath).toFixed(3) + ")");
+      glow.addColorStop(0.3, "hsla(" + hue + "," + sat + "%,74%," + (0.2 * alpha * breath).toFixed(3) + ")");
+      glow.addColorStop(1, "hsla(" + hue + "," + Math.min(100, sat + 8) + "%,70%,0)");
+      ctx.fillStyle = glow;
+      ctx.beginPath();
+      ctx.arc(x, y, Math.max(0.6, size), 0, turn);
+      ctx.fill();
+    }
+
+    // 本体只画中心一小坨：剩下的半径都是光晕，大星才看得出「亮核」而不是一块实心饼
+    const body = Math.max(0.7, Math.min(4.6, size * 0.3));
+    ctx.fillStyle = "hsla(" + hue + "," + sat + "%,78%," + Math.min(1, alpha * 0.95 + 0.05).toFixed(3) + ")";
+    ctx.beginPath();
+    ctx.arc(x, y, body, 0, turn);
+    ctx.fill();
+    ctx.fillStyle = "hsla(" + hue + ",100%,96%," + Math.min(1, alpha * 0.9 + 0.1).toFixed(3) + ")";
+    ctx.beginPath();
+    ctx.arc(x, y, Math.max(0.5, body * 0.55), 0, turn);
+    ctx.fill();
+  }
+}
+/* @starmap-end */
+
+/**
+ * 预渲染一颗星点：外层辉光 + 内核亮斑。画的时候直接 drawImage，
+ * 免得上千颗星每帧都现建径向渐变。思路参考 dsh-xingxi (Yuuyuko-uu)。
+ * 拿不到 document（例如 node 里抽出来跑）时返回 null，绘制会回落到渐变。
+ * @param {number} size 贴图边长像素。
+ * @returns {HTMLCanvasElement|null}
+ */
+function createStarSprite(size) {
+  const px = Math.round(clampNum(size === undefined ? STARMAP.SPRITE : size, 8, 256)) || STARMAP.SPRITE;
+  try {
+    if (typeof document === "undefined" || !document || typeof document.createElement !== "function") return null;
+    const canvas = document.createElement("canvas");
+    canvas.width = px;
+    canvas.height = px;
+    const ctx = typeof canvas.getContext === "function" ? canvas.getContext("2d") : null;
+    if (!ctx) return null;
+    const half = px / 2;
+    const glow = ctx.createRadialGradient(half, half, 0, half, half, half);
+    glow.addColorStop(0, "rgba(255,255,255,1)");
+    glow.addColorStop(0.12, "rgba(255,250,242,0.92)");
+    glow.addColorStop(0.3, "rgba(255,246,236,0.44)");
+    glow.addColorStop(0.62, "rgba(232,222,255,0.12)");
+    glow.addColorStop(1, "rgba(232,222,255,0)");
+    ctx.fillStyle = glow;
+    ctx.fillRect(0, 0, px, px);
+    return canvas;
+  } catch {
+    return null;
+  }
+}
+
+/** prefers-reduced-motion：真时只画一帧静态图。win 只为测试注入。 */
+function prefersReducedMotion(win) {
+  const target = win || (typeof window !== "undefined" ? window : null);
+  try {
+    const media = target && typeof target.matchMedia === "function" ? target.matchMedia("(prefers-reduced-motion: reduce)") : null;
+    return !!(media && media.matches === true);
+  } catch {
+    return false;
+  }
+}
+
+/** 时间戳 -> 「2025-02-03 21:04」：本地时区，记忆不需要秒级精度。 */
+function formatStamp(at) {
+  const ms = Number(at);
+  if (!Number.isFinite(ms) || ms <= 0) return "时间未知";
+  const d = new Date(ms);
+  const pad = (n) => (n < 10 ? "0" + n : String(n));
+  return d.getFullYear() + "-" + pad(d.getMonth() + 1) + "-" + pad(d.getDate()) + " " + pad(d.getHours()) + ":" + pad(d.getMinutes());
+}
+
+/** 命中测试：指针换算成画布坐标，取最近的一颗（多给 7px 余量，小星也点得中）。 */
+function starmapStarAt(layout, canvas, event, width, height) {
+  const nodes = layout && layout.nodes ? layout.nodes : [];
+  const rect = canvas && typeof canvas.getBoundingClientRect === "function" ? canvas.getBoundingClientRect() : null;
+  if (!rect || !rect.width || !rect.height) return null;
+  const x = ((Number(event && event.clientX) || 0) - rect.left) / rect.width * width;
+  const y = ((Number(event && event.clientY) || 0) - rect.top) / rect.height * height;
+  let best = -1;
+  let bestD = Infinity;
+  for (let i = 0; i < nodes.length; i += 1) {
+    const node = nodes[i];
+    const d = Math.sqrt((node.x - x) * (node.x - x) + (node.y - y) * (node.y - y));
+    if (d <= node.r + 7 && d < bestD) {
+      bestD = d;
+      best = i;
+    }
+  }
+  return best < 0 ? null : { id: layout.ids[best], index: best };
+}
+
+/** 选中那颗星的位置：停帧时也要能画出高亮圈。 */
+function starmapPickedNode(layout, id) {
+  const ids = layout && layout.ids ? layout.ids : [];
+  const at = ids.indexOf(String(id || ""));
+  return at >= 0 ? layout.nodes[at] : null;
+}
+
+/**
+ * 星图页：能画才画星空，其余情况一律给一句人话。
+ * state.status：idle / loading / ready / empty / error。
+ */
+function renderStarmapBody(state, h, handlers) {
+  const st = asObject(state);
+  const act = asObject(handlers);
+  const status = typeof st.status === "string" ? st.status : "idle";
+  if (status === "error") {
+    return [
+      h("section", { key: "starmap-fail", style: S.cardLight }, [
+        headRow(h, "memory", "记忆星图"),
+        h("div", { key: "why", style: S.soft }, "星图没取到：" + (typeof st.error === "string" && st.error ? st.error : "未知原因")),
+        h("div", { key: "note", style: S.note }, "其余几页照常，不受影响。"),
+        h("button", { key: "retry", type: "button", style: S.pill, onClick: () => { if (typeof act.onRetry === "function") act.onRetry(); } }, "重试"),
+      ]),
+    ];
+  }
+  if (status === "empty") {
+    return [
+      h("section", { key: "starmap-empty", style: S.cardLight }, [
+        headRow(h, "memory", "记忆星图"),
+        h("div", { key: "none", style: S.soft }, "还没有记忆，先把上面的记忆开关打开。"),
+        h("div", { key: "note", style: S.note }, "星图只画真实条目：库里没有，就一颗都不画。"),
+      ]),
+    ];
+  }
+  if (status !== "ready") {
+    return [
+      h("section", { key: "starmap-wait", style: S.cardLight }, [
+        headRow(h, "memory", "记忆星图"),
+        h("div", { key: "wait", style: S.soft }, "正在把记忆排成星空…"),
+      ]),
+    ];
+  }
+  const stars = asList(st.stars);
+  const picked = asObject(st.picked);
+  let detail;
+  if (st.hoverUnlit === true) {
+    // 空位只说这一句：没有正文、层、时间可给，给了就是编
+    detail = h("div", { key: "detail", style: S.starmapDetail }, [h("span", { key: "u", style: { color: C.dim } }, "还未点亮的记忆")]);
+  } else if (picked.id) {
+    detail = h("div", { key: "detail", style: S.starmapDetail }, [
+      h("span", { key: "t", style: { color: C.text1 } }, snippet(picked.text, 80) || "（这条没有正文）"),
+      h("span", { key: "tier", style: S.note }, TIER_LABELS[picked.tier] || "未分层"),
+      h("span", { key: "at", style: S.note }, formatStamp(picked.at)),
+    ]);
+  } else {
+    detail = h("div", { key: "detail", style: S.note }, "点一颗星，看它记得什么。");
+  }
+  const caption = st.truncated === true
+    ? "先画最近 " + stars.length + " 颗（库里有 " + fmt(st.total) + " 条），暗线是共享词面。"
+    : "一条记忆一颗星，暗线是它们共享的词面。";
+  return [
+    h("section", { key: "starmap", style: S.card }, [
+      headRow(h, "memory", "记忆星图 · " + fmt(st.total) + " 颗"),
+      h("canvas", {
+        key: "canvas",
+        ref: (node) => { if (typeof act.onCanvas === "function") act.onCanvas(node); },
+        role: "img",
+        "aria-label": "记忆星图：一条记忆一颗星，共享词面一条暗线",
+        style: S.starmapCanvas,
+      }),
+      // 图例只说亮暗之别，不给任何数字进度
+      h("div", { key: "legend", style: S.note }, "亮的是记得的事，暗的是还没点亮的空位"),
+      h("div", { key: "caption", style: S.note }, caption),
+      detail,
+    ]),
+  ];
+}
+
+/**
+ * 渲染入口。opts.tab：overview / starmap / about；不给时按「无 hooks」处理，顺序渲染概览与说明。
  * 不可用态保持原样：只有一张断线卡，不显示数字，也不显示说明页。
  */
 function renderBlocks(view, h, unavailable, opts) {
   const reason = typeof unavailable === "string" && unavailable ? unavailable : null;
   if (reason) return [h("div", { key: "panel", style: S.panel }, [unavailableCard(reason, h)])];
 
-  const tab = opts && (opts.tab === "about" || opts.tab === "overview") ? opts.tab : null;
+  const o = opts || {};
+  const tab = o.tab === "about" || o.tab === "overview" || o.tab === "starmap" ? o.tab : null;
   const children = [renderSegments(tab || "overview", null, h)];
-  if (tab !== "about") children.push.apply(children, renderOverview(asObject(view), h, opts && opts.actions));
-  if (tab !== "overview") children.push.apply(children, renderAbout(h));
+  // 星图页只画星图：它要一块 canvas，和另外两页的卡片不是一回事
+  if (tab !== "about" && tab !== "starmap") children.push.apply(children, renderOverview(asObject(view), h, o.actions));
+  if (tab !== "overview" && tab !== "starmap") children.push.apply(children, renderAbout(h));
+  if (tab === "starmap") children.push.apply(children, renderStarmapBody(o.starmap, h, o.handlers));
   return [h("div", { key: "panel", style: S.panel }, children)];
 }
 
@@ -1432,6 +2086,23 @@ function register(ctx, React) {
 
   // 取数结果放在 register 的闭包里：来回切页不重复打接口，说明页也不碰网络
   const panelStore = { status: "idle", view: null, reason: null };
+
+  // 星图同样放闭包里。区别是 effect 的依赖里绝不能出现「它自己刚写过的 state」：
+  // 那样 cleanup 会先跑，把在途请求的结果按 alive=false 丢掉，页面永远停在 loading。
+  const starmapStore = { status: "idle", view: null };
+
+  /**
+   * 取一次 universe：状态先落到 store 上，再把回包交给组件。
+   * effect 与「重试」共用这一条写入路径，所以不存在两处各自维护 loading 的机会。
+   */
+  function loadStarmap(setStarmap) {
+    starmapStore.status = "loading";
+    postAction({ action: "universe" }).then((res) => {
+      starmapStore.status = "done";
+      starmapStore.view = normalizeUniverse(res);
+      if (typeof setStarmap === "function") setStarmap(starmapStore.view);
+    });
+  }
 
   // 操作卡的本地状态；放在 register 闭包里，切页/重渲染都不丢，也便于测试直接驱动
   const actionStore = {
@@ -1642,6 +2313,19 @@ function register(ctx, React) {
     const actState = hooks ? hooks.useState(Object.assign({}, actionStore)) : [EMPTY_ACTIONS, () => {}];
     const actions = actState[0];
     const setActions = actState[1];
+    // 星图三格：回包、选中哪颗星、画布句柄。句柄要跟着实例活，别每次渲染重建。
+    const starState = hooks ? hooks.useState(starmapStore.view || EMPTY_STARMAP) : [EMPTY_STARMAP, () => {}];
+    const starmap = starState[0] || EMPTY_STARMAP;
+    const setStarmap = starState[1];
+    const pickedState = hooks ? hooks.useState("") : ["", () => {}];
+    const picked = pickedState[0];
+    const setPicked = pickedState[1];
+    const boxState = hooks ? hooks.useState({ canvas: null, selected: "", hover: "", focus: -1 }) : [{ canvas: null, selected: "", hover: "", focus: -1 }, () => {}];
+    const box = boxState[0];
+    // 指针停在空位上时改画布下面那一行：只影响文案，不动选中态
+    const hoverState = hooks ? hooks.useState("") : ["", () => {}];
+    const hover = hoverState[0];
+    const setHover = hoverState[1];
     if (hooks && typeof hooks.useEffect === "function") {
       // 订阅会话开关：另一处（输入区胶囊）改了，这里要跟着走
       hooks.useEffect(() => {
@@ -1671,6 +2355,123 @@ function register(ctx, React) {
           alive = false;
         };
       }, [tab]);
+
+      // 切到星图才问宿主：停在概览/说明页时一次请求都不多打。
+      // 依赖只写 [tab]——loading 不经过 setStarmap，这个 effect 就不会自己把自己重跑掉。
+      hooks.useEffect(() => {
+        if (tab !== "starmap" || starmapStore.status !== "idle") return undefined;
+        loadStarmap(setStarmap);
+      }, [tab]);
+
+      hooks.useEffect(() => {
+        // 画布生命周期：量一次尺寸 -> 布局一次 -> 起循环，或者只画一帧
+        if (tab !== "starmap" || starmap.status !== "ready") return undefined;
+        const canvas = box.canvas;
+        const ctx = canvas && typeof canvas.getContext === "function" ? canvas.getContext("2d") : null;
+        if (!ctx) return undefined;
+        const rect = typeof canvas.getBoundingClientRect === "function" ? canvas.getBoundingClientRect() : null;
+        const width = Math.round((rect && rect.width) || STARMAP.W) || STARMAP.W;
+        const height = STARMAP.H;
+        const dpr = Math.min(2, (typeof window !== "undefined" && window.devicePixelRatio) || 1);
+        canvas.width = Math.round(width * dpr);
+        canvas.height = Math.round(height * dpr);
+        if (typeof ctx.setTransform === "function") ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+        const layout = layoutUniverse(starmap.stars, starmap.links, width, height);
+        // 贴图只造一次：每帧上千次 drawImage 比每次现建径向渐变便宜得多
+        const sprite = createStarSprite(STARMAP.SPRITE);
+        let at = 0;
+        const paint = (time) => {
+          at = time;
+          drawStarmapFrame(ctx, layout.nodes, {
+            time: time,
+            links: layout.links,
+            width: width,
+            height: height,
+            sprite: sprite,
+            focus: box.focus,
+          });
+          const ring = starmapPickedNode(layout, box.selected);
+          if (!ring) return;
+          // 高亮圈画在帧外面：drawStarmapFrame 只认节点自己的七个字段
+          ctx.strokeStyle = "hsla(" + ring.hue + "," + Math.min(96, ring.sat + 20) + "%,90%,0.95)";
+          ctx.lineWidth = 1.2;
+          ctx.beginPath();
+          ctx.arc(ring.x, ring.y, ring.r + 6, 0, TAU);
+          ctx.stroke();
+        };
+        paint(0);
+        const still = prefersReducedMotion() || typeof requestAnimationFrame !== "function";
+        let raf = 0;
+        let idle = 0;
+        const stop = () => {
+          if (raf && typeof cancelAnimationFrame === "function") cancelAnimationFrame(raf);
+          raf = 0;
+        };
+        const loop = (stamp) => {
+          paint(Number(stamp) || 0);
+          raf = requestAnimationFrame(loop);
+        };
+        // 空闲 10 秒停帧；之后动一下指针就重新起转——停止只是省 CPU，不是结束
+        const wake = () => {
+          if (still) return;
+          if (idle) clearTimeout(idle);
+          idle = setTimeout(stop, STARMAP_IDLE_MS);
+          if (!raf) raf = requestAnimationFrame(loop);
+        };
+        // 命中的是空位时，详情换一句话；命中真实星时，只把它和相连的星点亮（focus）
+        const onMove = (event) => {
+          const hit = starmapStarAt(layout, canvas, event, width, height);
+          const next = hit && starmapIsUnlit(layout, hit.id) ? hit.id : "";
+          const focusAt = hit && !next ? hit.index : -1;
+          const focusChanged = box.focus !== focusAt;
+          if (box.hover !== next) {
+            box.hover = next;
+            setHover(next);
+          }
+          if (focusChanged) {
+            box.focus = focusAt;
+            paint(at); // 停帧时也要立刻看到压暗，不能等下一帧
+          }
+          wake();
+        };
+        const onLeave = () => {
+          const focusChanged = box.focus !== -1;
+          if (box.hover) {
+            box.hover = "";
+            setHover("");
+          }
+          if (focusChanged) {
+            box.focus = -1;
+            paint(at);
+          }
+        };
+        const onPick = (event) => {
+          const hit = starmapStarAt(layout, canvas, event, width, height);
+          // 点空位当点空白：它没有可展示的东西，别把选中态钉在一个空 id 上
+          box.selected = hit && !starmapIsUnlit(layout, hit.id) ? hit.id : "";
+          setPicked(box.selected);
+          paint(at);
+          wake();
+        };
+        wake();
+        const listen = (name, fn) => {
+          if (typeof canvas.addEventListener === "function") canvas.addEventListener(name, fn);
+        };
+        listen("pointermove", onMove);
+        listen("pointerdown", onPick);
+        listen("click", wake);
+        listen("pointerleave", onLeave);
+        return () => {
+          stop();
+          if (idle) clearTimeout(idle);
+          if (typeof canvas.removeEventListener === "function") {
+            canvas.removeEventListener("pointermove", onMove);
+            canvas.removeEventListener("pointerdown", onPick);
+            canvas.removeEventListener("click", wake);
+            canvas.removeEventListener("pointerleave", onLeave);
+          }
+        };
+      }, [tab, starmap]);
     }
 
     if (!hooks) {
@@ -1684,6 +2485,27 @@ function register(ctx, React) {
     const body = [renderSegments(tab, setTab, h)];
     if (tab === "about") {
       body.push.apply(body, renderAbout(h));
+    } else if (tab === "starmap") {
+      const pickedStar = asList(starmap.stars).filter((star) => star.id === picked)[0] || null;
+      body.push.apply(
+        body,
+        renderStarmapBody(Object.assign({}, starmap, { picked: pickedStar, hoverUnlit: hover !== "" }), h, {
+          onCanvas: (node) => {
+            box.canvas = node;
+          },
+          onRetry: () => {
+            box.selected = "";
+            box.hover = "";
+            box.focus = -1;
+            setPicked("");
+            setHover("");
+            starmapStore.status = "idle";
+            starmapStore.view = null;
+            setStarmap(EMPTY_STARMAP);
+            loadStarmap(setStarmap);
+          },
+        }),
+      );
     } else if (data.status === "ready") {
       body.push.apply(body, renderOverview(data.view, h, actions, actionHandlers(setActions)));
     } else if (data.status === "unavailable") {
@@ -1808,6 +2630,23 @@ if (typeof window !== "undefined" && window && window.__ModuleLoader__ && typeof
         register,
         starNodes,
         constellationNodes: starNodes,
+drawStarmapFrame,
+layoutUniverse,
+normalizeUniverse,
+renderStarmapBody,
+createStarSprite,
+unlitCount,
+unlitStars,
+starmapIsUnlit,
+prefersReducedMotion,
+starmapStarAt,
+starRadius,
+starHue,
+starSat,
+starAlpha,
+formatStamp,
+STARMAP,
+STARMAP_IDLE_MS,
         vectorReasonText,
         ICONS,
         STAR,
@@ -1819,3 +2658,5 @@ if (typeof window !== "undefined" && window && window.__ModuleLoader__ && typeof
     },
   });
 }
+
+})();

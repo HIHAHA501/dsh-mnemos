@@ -1,0 +1,27 @@
+name: ci
+
+# 两个平台都跑：Windows 与 POSIX 的差异（路径分隔符、rename 覆盖、锁文件）
+# 只在真实 runner 上才暴露得出来，本地 macOS 绿不代表 Windows 绿。
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      # 零运行时依赖：不需要 install，直接跑测试
+      - run: node --test
+      - run: node --check index.mjs
+      - run: node --check client.js

@@ -13,10 +13,12 @@ import { join } from "node:path";
 
 import { CAPTURE_FILE, createCaptureStore } from "./src/capture.mjs";
 import { resolveConfig } from "./src/config.mjs";
+import { estimateEmotion } from "./src/emotion.mjs";
 import { createMemCommand } from "./src/host/commands.mjs";
 import { createIngest, demoteSweep } from "./src/host/ingest.mjs";
 import { createLedger, createRetrievalIndex, latestUserText, rankRecords, renderInjection } from "./src/host/inject.mjs";
 import { projectMessages } from "./src/host/project.mjs";
+import { tokenize } from "./src/retrieval/tokenize.mjs";
 import { createMemoryTools } from "./src/host/tools.mjs";
 import { TIERS, createRecord } from "./src/record.mjs";
 import { createStore } from "./src/store.mjs";
@@ -357,7 +359,17 @@ function renderForContext(runtime, context) {
     return "";
   }
   const query = latestUserText(session);
-  const rendered = renderInjection({ query, records, index: runtime.index, config, now: Date.now() });
+  // 当轮心情用你这句话估：情绪分量里强度占大头（记录自带），共振只占小头
+  const mood = estimateEmotion(query);
+  const rendered = renderInjection({
+    query,
+    records,
+    index: runtime.index,
+    config,
+    now: Date.now(),
+    mood,
+    weights: { mood: config.moodWeight },
+  });
   try {
     runtime.ledger.record(sessionId, {
       ...rendered,
@@ -629,6 +641,101 @@ function isJsonContentType(value) {
   return /^application\/(?:[a-z0-9.+-]+\+)?json\b/i.test(String(value == null ? "" : value).trim());
 }
 
+/** 星图上限：再多也画不出信息，只会变成一片糊。 */
+const UNIVERSE_MAX_STARS = 300;
+const UNIVERSE_MAX_LINKS = 1200;
+const UNIVERSE_LINKS_PER_STAR = 5;
+/** 出现率超过这个比例的 token 是「背景噪声」（如「她」「的」），连起来只会得到一张蛛网。 */
+const UNIVERSE_TOKEN_DF_RATIO = 0.25;
+
+/**
+ * 把记忆库投影成星图数据：星 = 一条记忆，线 = 共享词面。
+ * 只读、有上限、不猜：连不起来就不连，不为凑数画线。
+ * @param {object} runtime 挂载句柄。
+ * @returns {object} {total, truncated, stars, links}
+ */
+function universeView(runtime) {
+  const total = Number(runtime.store.stats().count) || 0;
+  const records = runtime.store.candidates({ limit: UNIVERSE_MAX_STARS });
+  const stars = [];
+  const tokensOf = [];
+  for (const record of records) {
+    if (!record || record.id == null) continue;
+    const emotion = record.emotion && typeof record.emotion === "object" ? record.emotion : {};
+    const meta = record.meta && typeof record.meta === "object" ? record.meta : {};
+    const tags = [meta.topic, meta.person, meta.place]
+      .filter(function (value) { return typeof value === "string" && value.trim(); })
+      .slice(0, 3)
+      .map(function (value) { return panelClip(value, 16); });
+    stars.push({
+      id: String(record.id),
+      text: panelClip(record.text, 80),
+      kind: typeof record.kind === "string" ? record.kind : "",
+      tier: typeof record.tier === "string" ? record.tier : "",
+      weight: Number.isFinite(record.weight) ? record.weight : 0.5,
+      mentions: Number.isFinite(record.mentions) ? record.mentions : 0,
+      pinned: record.pinned === true,
+      valence: Number.isFinite(emotion.valence) ? emotion.valence : 0,
+      arousal: Number.isFinite(emotion.arousal) ? emotion.arousal : 0.3,
+      at: Number(record.updatedAt || record.createdAt) || 0,
+      tags: tags,
+    });
+    // 线只按正文与标签的共享词面连，不用 emotion：情绪相近不等于有关系
+    const seen = new Set();
+    const tokens = [];
+    for (const token of tokenize(String(record.text || ""))) {
+      const ok = token.length >= 2 && !seen.has(token);
+      if (ok) { seen.add(token); tokens.push(token); }
+    }
+    for (const tag of tags) {
+      const key = "tag:" + tag.toLowerCase();
+      if (!seen.has(key)) { seen.add(key); tokens.push(key); }
+    }
+    tokensOf.push(tokens);
+  }
+
+  // 每个 token 的文档频次：只留「至少两条、且不是背景噪声」的
+  const df = new Map();
+  for (const tokens of tokensOf) for (const token of tokens) df.set(token, (df.get(token) || 0) + 1);
+  const ceiling = Math.max(2, Math.ceil(stars.length * UNIVERSE_TOKEN_DF_RATIO));
+  const byToken = new Map();
+  for (let i = 0; i < tokensOf.length; i += 1) {
+    for (const token of tokensOf[i]) {
+      const n = df.get(token) || 0;
+      if (n < 2 || n > ceiling) continue;
+      const bucket = byToken.get(token);
+      if (bucket) bucket.push(i);
+      else byToken.set(token, [i]);
+    }
+  }
+
+  const pairs = new Set();
+  const perStar = new Map();
+  for (const bucket of byToken.values()) {
+    for (let a = 0; a < bucket.length; a += 1) {
+      for (let b = a + 1; b < bucket.length; b += 1) {
+        const i = bucket[a];
+        const j = bucket[b];
+        const key = i < j ? i + ":" + j : j + ":" + i;
+        if (pairs.has(key)) continue;
+        if ((perStar.get(i) || 0) >= UNIVERSE_LINKS_PER_STAR) continue;
+        if ((perStar.get(j) || 0) >= UNIVERSE_LINKS_PER_STAR) continue;
+        if (pairs.size >= UNIVERSE_MAX_LINKS) break;
+        pairs.add(key);
+        perStar.set(i, (perStar.get(i) || 0) + 1);
+        perStar.set(j, (perStar.get(j) || 0) + 1);
+      }
+    }
+  }
+  const links = [];
+  for (const key of pairs) {
+    const parts = key.split(":");
+    links.push([stars[Number(parts[0])].id, stars[Number(parts[1])].id]);
+  }
+
+  return { total, truncated: records.length >= UNIVERSE_MAX_STARS, stars, links };
+}
+
 function panelClip(text, max) {
   const source = String(text == null ? "" : text).replace(/\s+/g, " ").trim();
   return source.length <= max ? source : source.slice(0, max - 1) + "…";
@@ -757,6 +864,12 @@ function panelAction(runtime, body, res) {
         };
       }),
     });
+    return;
+  }
+
+  if (action === "universe") {
+    const view = universeView(runtime);
+    jsonResponse(res, 200, { ok: true, ...view });
     return;
   }
 

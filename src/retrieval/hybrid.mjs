@@ -1,10 +1,11 @@
-// 融合排序：bm25 + 元数据亲和 + 向量 + 热度的加权和，分量各自归一到 0..1 后加权。
-// 向量缺席时把那部分权重按 bm25:meta 的原有比例并入，避免凭空放大单侧。
+// 融合排序：bm25 + 元数据亲和 + 向量 + 热度 + 情绪，分量各自归一到 0..1 后加权。
+// 向量缺席时把那部分权重按 bm25:meta 的原有比例并入，避免凭空放大单侧；
+// 情绪缺席（调用方没给 mood）时它整份退出归一，算出的分值与接入前逐个相同。
 
 import { tokenize } from './tokenize.mjs';
 import { cosine } from './vector.mjs';
 
-export const DEFAULT_WEIGHTS = { bm25: 0.55, meta: 0.25, vector: 0.15, heat: 0.05 };
+export const DEFAULT_WEIGHTS = { bm25: 0.55, meta: 0.25, vector: 0.15, heat: 0.05, mood: 0 };
 export const MAX_RESULTS = 50;
 // 单字 CJK 命中只参与打分、不授予候选资格：否则「计划」里的「计」会让查询
 // 「量子计算机」召回讲「杭州计划」的记忆——用户问 A、她提 B，比漏召更伤信任
@@ -12,7 +13,15 @@ export const UNI_GRAM_WEIGHT = 0.35;
 // 向量通道的候选下限：低于它说明"语义上也不近"，不授予候选资格
 export const DEFAULT_VECTOR_FLOOR = 0.35;
 
-const KEYS = ['bm25', 'meta', 'vector', 'heat'];
+const BASE_KEYS = ['bm25', 'meta', 'vector', 'heat'];
+const KEYS = [...BASE_KEYS, 'mood'];
+// 情绪分量内部：「当时有多强烈」占大头，「和你此刻心情像不像」只占小头。
+// 强度是记录自带的稳定属性，共振依赖当轮对心情的估计，估错时不该主导排序。
+export const MOOD_INTENSITY_SHARE = 0.65;
+// 没有情绪线索的记录 arousal 都停在这个中性基线上，拿它当零点才不会把「中性」算成「强烈」
+export const NEUTRAL_AROUSAL = 0.3;
+// 两边都要有明确正负号才谈得上「共振」：0 分代表没表态，不是「和我一样」
+export const VALENCE_SIGNAL = 0.1;
 // 与 tokenize.mjs 的 CJK 口径保持一致：只有单字 CJK 才算 uni-gram
 const CJK_CHAR = /[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\u3040-\u309f\u30a0-\u30ff\uac00-\ud7af]/;
 const isUniGram = (t) => t.length === 1 && CJK_CHAR.test(t);
@@ -20,28 +29,32 @@ const isUniGram = (t) => t.length === 1 && CJK_CHAR.test(t);
 const num = (v, d = 0) => (Number.isFinite(v) ? Number(v) : d);
 const clamp01 = (v) => (v < 0 ? 0 : v > 1 ? 1 : v);
 
-export function effectiveWeights(weights, hasVector = true) {
+export function effectiveWeights(weights, hasVector = true, hasMood = false) {
   const src = weights || {};
+  // 情绪缺席时它连归一都不参与（不是「拿 0 分参与」）：这样不开情绪的调用
+  // 拿到的四个分量与接入前逐位相同，已有的排序结果不会被悄悄改写。
+  const keys = hasMood ? KEYS : BASE_KEYS;
   const raw = {};
   let total = 0;
-  for (const k of KEYS) {
+  for (const k of keys) {
     raw[k] = Math.max(0, num(src[k], DEFAULT_WEIGHTS[k]));
     total += raw[k];
   }
   if (!(total > 0)) return { ...DEFAULT_WEIGHTS };
-  const base = {};
-  for (const k of KEYS) base[k] = raw[k] / total;
+  const base = { mood: 0 };
+  for (const k of keys) base[k] = raw[k] / total;
   if (hasVector) return base;
   const share = base.vector;
   const pool = base.bm25 + base.meta;
   if (!(pool > 0)) {
-    return { bm25: share / 2, meta: share / 2, vector: 0, heat: base.heat };
+    return { bm25: share / 2, meta: share / 2, vector: 0, heat: base.heat, mood: base.mood };
   }
   return {
     bm25: base.bm25 + share * (base.bm25 / pool),
     meta: base.meta + share * (base.meta / pool),
     vector: 0,
     heat: base.heat,
+    mood: base.mood,
   };
 }
 
@@ -120,7 +133,26 @@ function heatScore(record, now) {
   return clamp01(0.35 * recency + 0.2 * mentions + 0.25 * weight + 0.2 * pinned);
 }
 
-export function rank({ query, records, metaIndex, bm25, vectors, now, weights, heatOf } = {}) {
+/**
+ * 情绪分量：当时情绪越强烈，这条越容易被想起（强度主导）；
+ * 当下心情与它同向时再补一点，让「你现在什么感受」也有话说，但翻不了盘。
+ * @param {object} record 记忆记录（带 emotion: {valence, arousal}）。
+ * @param {{valence?: number}} mood 当轮估出的心情。
+ * @returns {number} 0..1 的分量分；没有情绪数据时为 0。
+ */
+export function moodScore(record, mood) {
+  const emotion = record && record.emotion ? record.emotion : null;
+  if (!emotion) return 0;
+  const arousal = clamp01(num(emotion.arousal, NEUTRAL_AROUSAL));
+  const intensity = clamp01((arousal - NEUTRAL_AROUSAL) / (1 - NEUTRAL_AROUSAL));
+  const recordValence = num(emotion.valence, 0);
+  const moodValence = mood ? num(mood.valence, 0) : 0;
+  const bothPolar = Math.abs(recordValence) > VALENCE_SIGNAL && Math.abs(moodValence) > VALENCE_SIGNAL;
+  const resonance = bothPolar ? clamp01(1 - Math.abs(moodValence - recordValence) / 2) : 0;
+  return clamp01(MOOD_INTENSITY_SHARE * intensity + (1 - MOOD_INTENSITY_SHARE) * resonance);
+}
+
+export function rank({ query, records, metaIndex, bm25, vectors, now, weights, heatOf, mood } = {}) {
   const list = Array.isArray(records) ? records.filter((r) => r && r.id != null) : [];
   if (!list.length) return [];
 
@@ -131,7 +163,8 @@ export function rank({ query, records, metaIndex, bm25, vectors, now, weights, h
 
   const vec = readVectors(vectors);
   const hasVector = !!(vec && vec.queryVec && vec.get);
-  const w = effectiveWeights(weights, hasVector);
+  const hasMood = !!(mood && Number.isFinite(num(mood.valence, Number.NaN)));
+  const w = effectiveWeights(weights, hasVector, hasMood);
 
   // BM25 对查询词可加，所以「强词全额 + 单字 0.35×」与逐词调权等价，
   // 不必改动 bm25 模块的签名，也就不必改动它的单测
@@ -164,7 +197,7 @@ export function rank({ query, records, metaIndex, bm25, vectors, now, weights, h
   for (let i = 0; i < list.length; i++) {
     const record = list[i];
     const id = String(record.id);
-    const parts = { bm25: 0, meta: 0, vector: 0, heat: 0 };
+    const parts = { bm25: 0, meta: 0, vector: 0, heat: 0, mood: 0 };
     const strongHit = strongHits.get(record.id) ?? strongHits.get(id) ?? 0;
     const weakHit = weakHits.get(record.id) ?? weakHits.get(id) ?? 0;
     let sim = 0;
@@ -188,16 +221,17 @@ export function rank({ query, records, metaIndex, bm25, vectors, now, weights, h
     parts.meta = fromIndex == null ? metaScore(record, queryTerms) : fromIndex;
     if (sim > 0) parts.vector = sim;
     parts.heat = typeof heatOf === 'function' ? heatOf(record, nowMs) : heatScore(record, nowMs);
+    if (hasMood) parts.mood = moodScore(record, mood);
     rows.push({ record, parts, order: i, score: 0, partsNorm: null });
   }
 
-  const max = { bm25: 0, meta: 0, vector: 0, heat: 0 };
+  const max = { bm25: 0, meta: 0, vector: 0, heat: 0, mood: 0 };
   for (const row of rows) {
     for (const k of KEYS) if (row.parts[k] > max[k]) max[k] = row.parts[k];
   }
 
   for (const row of rows) {
-    const pn = { bm25: 0, meta: 0, vector: 0, heat: 0 };
+    const pn = { bm25: 0, meta: 0, vector: 0, heat: 0, mood: 0 };
     let s = 0;
     for (const k of KEYS) {
       pn[k] = max[k] > 0 ? row.parts[k] / max[k] : 0;

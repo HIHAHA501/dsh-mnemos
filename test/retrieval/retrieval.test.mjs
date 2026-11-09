@@ -507,4 +507,46 @@ test('候选③：vectorFloor 边界 0.34 不进、0.36 进，weights.vectorFloo
   assert.ok(lowered.map((r) => r.record.id).includes('below'), 'vectorFloor 应可通过 weights 覆盖');
 });
 
+// ---------- 情绪分量：强度主导 + 共振只补一点也不翻盘 ----------
+
+const MOOD_ONLY = { bm25: 0, meta: 0, vector: 0, heat: 0, mood: 1 };
+
+test('mood: 没给 mood 时它不参与归一，分值不被悄悄改写', () => {
+  assert.deepEqual(effectiveWeights({ mood: 0.5 }, false, false), effectiveWeights({}, false));
+  assert.equal(effectiveWeights(undefined, true, false).mood, 0);
+  // 库默认 mood=0（关）；由插件配置把权重传进来才生效，与 index.mjs 的 config.moodWeight 一致
+  const on = effectiveWeights({ mood: 0.15 }, true, true);
+  const sum = Object.values(on).reduce((s, x) => s + x, 0);
+  assert.ok(Math.abs(sum - 1) < 1e-12, '开启后仍应归一，实际 ' + sum);
+  assert.ok(on.mood > 0, '开启后情绪应分到一份权重');
+  assert.ok(on.mood < on.bm25, '情绪权重不该压过词面匹配');
+});
+
+test('mood: 同等词面下，当时情绪更强烈的记忆排在前面', () => {
+  const now = Date.UTC(2025, 5, 1);
+  const recs = [
+    rec('flat', '她说周末想去海边', { emotion: { valence: 0, arousal: 0.3 } }),
+    rec('warm', '她说周末想去海边', { emotion: { valence: 0, arousal: 0.9 } }),
+  ];
+  const ids = rank({ query: '海边', records: recs, now, mood: { valence: 0, arousal: 0.3 }, weights: MOOD_ONLY })
+    .map((r) => r.record.id);
+  assert.deepEqual(ids, ['warm', 'flat']);
+});
+
+test('mood: 共振只在两边都有明确正负号时生效，0 不算「和我一样」', () => {
+  const now = Date.UTC(2025, 5, 1);
+  const mk = (id, valence) => rec(id, '今天有点累', { emotion: { valence, arousal: 0.3 } });
+  const rows = rank({
+    query: '累',
+    records: [mk('same', -0.8), mk('opposite', 0.8), mk('none', 0)],
+    now,
+    mood: { valence: -0.9, arousal: 0.5 },
+    weights: MOOD_ONLY,
+  });
+  const byId = new Map(rows.map((r) => [r.record.id, r.parts.mood]));
+  assert.ok(byId.get('same') > 0.3, '同向的该拿到共振分，实际 ' + byId.get('same'));
+  assert.ok(byId.get('opposite') < 0.1, '反向的不该被抬，实际 ' + byId.get('opposite'));
+  assert.equal(byId.get('none'), 0);
+});
+
 

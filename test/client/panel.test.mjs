@@ -1000,3 +1000,709 @@ test("没有 window.__ModuleLoader__ 时整份文件不做事也不抛", () => {
   sandbox.globalThis = sandbox;
   assert.doesNotThrow(() => vm.runInNewContext(CLIENT_SRC, sandbox, { filename: "client.js" }));
 });
+/* --------------------------------------------------------------- 星图 */
+
+/** 星图绘制段：验收会原样抽出去截图，所以这里也按标记抽。 */
+function starmapSlice() {
+  const open = "/* @starmap-start */";
+  const close = "/* @starmap-end */";
+  const start = CLIENT_SRC.indexOf(open);
+  const end = CLIENT_SRC.indexOf(close);
+  assert.ok(start >= 0 && end > start, "星图标记要在场：" + start + " / " + end);
+  return CLIENT_SRC.slice(start + open.length, end);
+}
+
+test("星图：第三个页签叫「星图」，点一下切到 starmap", () => {
+  const { exports } = loadClient();
+  const view = exports.__test.buildViewModel(hostPayload());
+  const tree = exports.__test.renderBlocks(view, makeReact().createElement, null, { tab: "overview" });
+  const seg = buttonByText(tree, "星图");
+  assert.ok(seg, "缺第三个页签「星图」");
+  assert.equal(seg.props["aria-pressed"], false, "默认不该是按下态");
+  assert.equal(buttonByText(tree, "概览").props["aria-pressed"], true);
+  const group = findAll(tree, (n) => n.props && n.props.role === "tablist")[0];
+  assert.equal(group.children.length, 3, "概览 / 星图 / 说明 三段都在");
+
+  // 切页只动本地状态：setter 收到 starmap
+  const react = makeReactWith({ 0: "overview" });
+  const client = loadClient({ react: react.react, extra: { fetch: () => new Promise(() => {}) } });
+  const captured = [];
+  client.exports.apply({ get: () => ({ inject: (n, f) => captured.push(f), register: (d, c) => ({ d, c }) }) });
+  const panel = componentOf(captured, "settings.section").component();
+  buttonByText(panel, "星图").props.onClick();
+  assert.ok(react.calls.set.indexOf("starmap") >= 0, "setter 应收到 starmap");
+});
+
+test("星图：切到星图才发 POST，请求体是 universe，回来才画 canvas", async () => {
+  const { calls, render } = await mountPanel((opt, body) => {
+    if (body && body.action === "universe") {
+      return {
+        body: {
+          ok: true,
+          total: 2,
+          truncated: false,
+          stars: [
+            { id: "a1", text: "用户说周末想去海边走走", kind: "turn", tier: "hot", weight: 0.8, mentions: 2, pinned: false, valence: 0.6, arousal: 0.8, at: 1738312800000, tags: ["海边"] },
+            { id: "b2", text: "用户最近在学手冲咖啡", kind: "turn", tier: "cold", weight: 0.4, mentions: 0, pinned: false, valence: -0.2, arousal: 0.3, at: 1738312900000, tags: ["咖啡"] },
+          ],
+          links: [["a1", "b2"]],
+        },
+      };
+    }
+    return { body: { stats: { count: 2 }, budget: {}, vector: { state: "on" }, recalls: [] } };
+  });
+  buttonByText(render(), "星图").props.onClick();
+  render(); // 切页后要再渲染一次：effect 是在渲染里跑的
+  await tick();
+  const tree = render();
+
+  const sent = posts(calls).filter((c) => c.body && JSON.stringify(c.body).includes("universe"));
+  assert.equal(sent.length, 1, "切到星图应当只问一次，实际 " + sent.length);
+  assert.equal(sent[0].method, "POST");
+  assert.equal(sent[0].body.action, "universe");
+  assert.equal(sent[0].headers["content-type"], "application/json");
+  assert.equal(sent[0].headers["x-dsh-mnemos"], "1", "必带请求头不能少");
+  assert.equal(findAll(tree, (n) => n.tag === "canvas").length, 1, "有数据才摆画布");
+  assert.ok(texts(tree).includes("记忆星图 · 2 颗"), texts(tree).slice(0, 300));
+
+  // 重渲染不该重复请求
+  render();
+  await tick();
+  assert.equal(posts(calls).filter((c) => c.body && c.body.action === "universe").length, 1);
+});
+
+test("星图：宿主失败时给可读文案，不把设置节带崩", async () => {
+  const { render } = await mountPanel((opt, body) => {
+    if (body && body.action === "universe") return { status: 503, body: { ok: false, error: "宿主忙，稍后再试" } };
+    return { body: { stats: { count: 1 }, budget: {}, vector: { state: "on" }, recalls: [] } };
+  });
+  buttonByText(render(), "星图").props.onClick();
+  render();
+  await tick();
+  const flat = texts(render());
+  assert.ok(flat.includes("星图没取到：宿主忙，稍后再试"), flat.slice(0, 300));
+  assert.ok(flat.includes("其余几页照常"), "要说明别的页没被拖累");
+  assert.ok(flat.includes("重试"), "失败要留一条重试");
+  assert.equal(findAll(render(), (n) => n.tag === "canvas").length, 0, "失败不许摆一块空画布");
+});
+
+test("星图：空库说实话，不画空星空", async () => {
+  const { render } = await mountPanel((opt, body) => {
+    if (body && body.action === "universe") return { body: { ok: true, total: 0, truncated: false, stars: [], links: [] } };
+    return { body: { stats: { count: 0 }, budget: {}, vector: { state: "off" }, recalls: [] } };
+  });
+  buttonByText(render(), "星图").props.onClick();
+  render();
+  await tick();
+  const tree = render();
+  const flat = texts(tree);
+  assert.ok(flat.includes("还没有记忆，先把上面的记忆开关打开"), flat.slice(0, 300));
+  assert.equal(findAll(tree, (n) => n.tag === "canvas").length, 0, "没有记忆就不该有画布");
+});
+
+test("星图：空闲 10 秒停帧，reduced-motion 只画一帧", () => {
+  const { exports } = loadClient();
+  const { STARMAP_IDLE_MS, prefersReducedMotion } = exports.__test;
+  assert.equal(STARMAP_IDLE_MS, 10000);
+  assert.ok(/STARMAP_IDLE_MS = 10000/.test(CLIENT_SRC), "常量要写死 10000，测试盯的就是它");
+  assert.ok(CLIENT_SRC.includes("setTimeout(stop, STARMAP_IDLE_MS)"), "停帧由这个 setTimeout 触发");
+  assert.ok(CLIENT_SRC.includes('listen("pointermove", onMove)'), "指针一有活动就要重新起转");
+  assert.ok(CLIENT_SRC.includes("prefers-reduced-motion"), "reduced-motion 分支要在源码里点名");
+
+  assert.equal(prefersReducedMotion({ matchMedia: () => ({ matches: true }) }), true);
+  assert.equal(prefersReducedMotion({ matchMedia: () => ({ matches: false }) }), false);
+  assert.equal(prefersReducedMotion({ matchMedia: () => { throw new Error("boom"); } }), false, "取不到就按能动处理");
+  assert.equal(prefersReducedMotion({}), false);
+});
+
+test("星图：颜色 / 亮度 / 大小按约定的字段映射", () => {
+  const { starHue, starSat, starAlpha, starRadius } = loadClient().exports.__test;
+  assert.equal(starHue(1), 28, "正情绪是暖橙");
+  assert.equal(starHue(-1), 215, "负情绪是冷蓝");
+  assert.equal(starHue(0), 190, "接近 0 落在灰青");
+  assert.ok(starSat(0) < starSat(0.5) && starSat(0.5) < starSat(1), "饱和度随 |valence| 上升");
+  assert.ok(starSat(0) <= 20, "情绪很淡时接近灰，别一上来就艳");
+  assert.equal(starAlpha(0.3), 0.55, "0.3 是平常亮度");
+  assert.equal(starAlpha(1), 1, "1.0 是很亮");
+  assert.ok(starAlpha(0) < starAlpha(0.3));
+  const base = { text: "十个字的正文长度", weight: 0.4 };
+  assert.ok(starRadius({ text: "一段很长很长的正文，".repeat(12), weight: 0.4 }) > starRadius(base), "正文越长的星越大");
+  assert.ok(starRadius({ text: base.text, weight: 0.9 }) > starRadius(base), "weight 大的星要大");
+  assert.equal(starRadius({ text: "", weight: 0 }), 2, "空正文 + 零权重落到下限");
+  assert.ok(starRadius({ text: "长".repeat(400), weight: 1 }) <= 18, "再长也不许超过上限");
+});
+
+test("星图：布局确定性、不出界，节点就是约定的七个字段", () => {
+  const { layoutUniverse, STARMAP } = loadClient().exports.__test;
+  const stars = [
+    { id: "a", tier: "hot", kind: "turn", tags: ["海边"], weight: 0.8, mentions: 3, pinned: true, valence: 0.7, arousal: 0.9 },
+    { id: "b", tier: "hot", kind: "turn", tags: ["海边"], weight: 0.4, mentions: 0, pinned: false, valence: -0.5, arousal: 0.3 },
+    { id: "c", tier: "cold", kind: "turn", tags: ["咖啡"], weight: 0.5, mentions: 1, pinned: false, valence: 0, arousal: 0.3 },
+    { id: "d", tier: "persona", kind: "note", tags: [], weight: 0.6, mentions: 0, pinned: false, valence: 0.1, arousal: 0.5 },
+  ];
+  const links = [["a", "b"], ["b", "c"], ["a", "a"], ["a", "nope"]];
+  const one = layoutUniverse(stars, links, 520, 300);
+  const two = layoutUniverse(stars, links, 520, 300);
+  assert.equal(JSON.stringify(one), JSON.stringify(two), "同一份数据必须画出同一张图");
+  // 跨 realm：数组原型不同，deepEqual 会假红，按 JSON 比
+  assert.equal(JSON.stringify(one.links), "[[0,1],[1,2]]", "自连与不存在的 id 都要丢掉，留下的是下标对");
+  assert.equal(one.unlitIds.length, 44, "4 条真实记忆时补满 44 个空位");
+  assert.equal(one.nodes.length, stars.length + one.unlitIds.length, "真实星在前，空位在后，一起进布局");
+  for (const node of one.nodes) {
+    assert.deepEqual(Object.keys(node).sort(), ["alpha", "hue", "phase", "r", "sat", "x", "y"], "节点只该有这七个字段");
+    assert.ok(node.phase >= 0 && node.phase < 2 * Math.PI, "呼吸相位在 0..2π");
+  }
+  assert.equal(one.depth.length, one.nodes.length, "深度与节点一一对应");
+  assert.equal(one.anchor, 0, "钉住且权重最高的那颗当锚点");
+  for (let i = 0; i < stars.length; i += 1) {
+    const node = one.nodes[i];
+    assert.ok(
+      node.x >= STARMAP.PAD && node.x <= 520 - STARMAP.PAD && node.y >= STARMAP.PAD && node.y <= 300 - STARMAP.PAD,
+      "真实星要落在画布内并留出 PAD：" + JSON.stringify(node),
+    );
+    if (i === one.anchor) {
+      assert.ok(node.r >= 40 && node.r <= 44, "锚点星半径 40~44：" + node.r);
+      assert.equal(node.alpha, 1, "核心星是最亮的");
+      continue;
+    }
+    assert.ok(node.r >= 2.6 && node.r <= STARMAP.R_MAX, "真实星半径（深度会压小，地板 2.6）：" + node.r);
+    assert.ok(node.alpha >= 0.17 && node.alpha <= 1, "真实星 alpha 由深度定，范围 0.17~1：" + node.alpha);
+  }
+  for (let i = stars.length; i < one.nodes.length; i += 1) {
+    const node = one.nodes[i];
+    assert.ok(Number.isFinite(node.x) && Number.isFinite(node.y), "空位坐标要有限：" + JSON.stringify(node));
+    assert.ok(node.r >= 1.2 && node.r <= 2.2, "空位半径 1.2~2.2：" + node.r);
+    assert.ok(node.alpha >= 0.2 && node.alpha <= 0.3, "空位透明度 0.20~0.30：" + node.alpha);
+    assert.equal(node.hue, 218, "空位是灰蓝");
+    assert.ok(node.sat >= 8 && node.sat <= 16, "空位饱和度 8~16：" + node.sat);
+  }
+  for (const pair of one.links) {
+    assert.ok(pair[0] < stars.length && pair[1] < stars.length, "空位不参与连线");
+  }
+  assert.ok(one.unlitIds.every((id) => id.indexOf("unlit-") === 0), "空位 id 带 unlit- 前缀");
+  // 一颗星也不许崩
+  const solo = layoutUniverse([stars[0]], [], 520, 300);
+  assert.equal(solo.unlitIds.length, 44);
+  assert.ok(Number.isFinite(solo.nodes[0].x) && Number.isFinite(solo.nodes[0].y));
+});
+
+test("星图：锚点星坐在球心、半径 40~44，没有候选就不造", () => {
+  const { layoutUniverse } = loadClient().exports.__test;
+  const stars = [
+    { id: "p1", tier: "persona", text: "她怕吵", weight: 0.5, pinned: false, valence: 0, arousal: 0.3, at: 1 },
+    { id: "h1", tier: "hot", text: "海边", weight: 0.9, pinned: true, valence: 0.5, arousal: 0.5, at: 2 },
+    { id: "h2", tier: "hot", text: "咖啡", weight: 0.2, pinned: false, valence: 0, arousal: 0.3, at: 3 },
+  ];
+  const layout = layoutUniverse(stars, [], 520, 300);
+  assert.equal(layout.anchor, 1, "钉住 / 人格前提里权重最高的那颗当锚点");
+  const node = layout.nodes[layout.anchor];
+  assert.ok(Math.abs(node.x - 260) < 1 && Math.abs(node.y - 150) < 1, "锚点星落在球心（画布中心）：" + JSON.stringify(node));
+  assert.ok(node.r >= 40 && node.r <= 44, "锚点星半径 40~44：" + node.r);
+
+  const plain = stars.map((s) => Object.assign({}, s, { pinned: false, tier: "hot" }));
+  assert.equal(layoutUniverse(plain, [], 520, 300).anchor, -1, "没有钉住也没有人格前提时不该硬造锚点");
+});
+
+test("星图：16 条输入跑两次，坐标逐位相同", () => {
+  const { layoutUniverse } = loadClient().exports.__test;
+  const stars = [];
+  for (let i = 0; i < 16; i += 1) {
+    stars.push({
+      id: "x" + i,
+      tier: ["hot", "cold", "persona", "state"][i % 4],
+      text: "记忆".repeat(1 + i),
+      weight: i / 16,
+      pinned: i === 3,
+      valence: i / 16,
+      arousal: (i % 5) / 5,
+      at: 1738312800000 + i * 1000,
+    });
+  }
+  const one = JSON.stringify(layoutUniverse(stars, [["x0", "x1"]], 520, 300));
+  const two = JSON.stringify(layoutUniverse(stars, [["x0", "x1"]], 520, 300));
+  assert.equal(one, two, "同一份 16 条输入必须逐位相同");
+});
+
+test("星图：深度越远，alpha 越小（也越小颗）", () => {
+  const { layoutUniverse } = loadClient().exports.__test;
+  const stars = [];
+  for (let i = 0; i < 12; i += 1) {
+    stars.push({ id: "d" + i, tier: "cold", text: "一样长的正文", weight: 0.5, pinned: false, valence: 0, arousal: 0.6, at: i });
+  }
+  const layout = layoutUniverse(stars, [], 520, 300);
+  const order = stars.map((_, i) => i).sort((a, b) => layout.depth[a] - layout.depth[b]);
+  for (let k = 1; k < order.length; k += 1) {
+    const near = layout.nodes[order[k - 1]];
+    const far = layout.nodes[order[k]];
+    assert.ok(layout.depth[order[k]] >= layout.depth[order[k - 1]]);
+    assert.ok(far.alpha <= near.alpha + 1e-9, "越远越暗：" + near.alpha + " -> " + far.alpha);
+  }
+  assert.ok(layout.nodes[order[0]].alpha > layout.nodes[order[order.length - 1]].alpha, "深度要把亮度真拉开，不能只差一点点");
+});
+
+test("星图：绘制段自包含——抽出来放进空上下文也能画", () => {
+  const slice = starmapSlice();
+  assert.equal((CLIENT_SRC.match(/@starmap-start/g) || []).length, 1, "标记只能出现一次");
+  assert.equal((CLIENT_SRC.match(/@starmap-end/g) || []).length, 1);
+  assert.equal((slice.match(/function\s+\w+/g) || []).length, 1, "标记之间只该有一个函数");
+  assert.equal((slice.match(/function drawStarmapFrame/g) || []).length, 1);
+
+  const drawn = { fills: 0, strokes: 0, arcs: 0, colors: [] };
+  const ctx = {
+    createLinearGradient: () => ({ addColorStop() {} }),
+    createRadialGradient: () => ({ addColorStop() {} }),
+    fillRect() { drawn.fills += 1; },
+    beginPath() {},
+    moveTo() {},
+    lineTo() {},
+    arc() { drawn.arcs += 1; },
+    stroke() { drawn.strokes += 1; },
+    fill() {},
+    set fillStyle(value) { drawn.colors.push(String(value)); },
+    set strokeStyle(value) { drawn.colors.push(String(value)); },
+    lineWidth: 1,
+  };
+  const nodes = [
+    { x: 30, y: 60, r: 4, hue: 190, sat: 30, alpha: 0.55, phase: 0 },
+    { x: 140, y: 90, r: 3, hue: 28, sat: 52, alpha: 0.9, phase: 1.2 },
+    { x: 90, y: 150, r: 1.6, hue: 218, sat: 11, alpha: 0.2, phase: 2.4 },
+  ];
+  const opts = { time: 0, links: [[0, 1]], width: 320, height: 200 };
+  // 沙箱里只有 ctx / nodes / opts 和标准库：引用了文件里别的函数会直接抛
+  vm.runInNewContext(slice + ";drawStarmapFrame(ctx, nodes, opts);", { ctx, nodes, opts, Math, Set, Map });
+  assert.equal(drawn.fills, 1, "底色要自己铺满，不能靠宿主背景");
+  assert.equal(drawn.arcs, 7, "真实星三笔（光晕 + 星体 + 白热核心），空位只画一笔本体");
+  const hotCores = drawn.colors.filter((c) => c.indexOf(",100%,96%,") > 0);
+  assert.equal(hotCores.length, 2, "白热核心只给两颗真实星，空位不许带亮点");
+  assert.equal(drawn.strokes, 1, "一条线画一次");
+  assert.ok(drawn.colors.some((c) => c.indexOf("hsla(") === 0), "星色走 hsla：" + drawn.colors.join("|"));
+});
+
+test("星图：给了贴图就走 drawImage，不再每帧现建渐变", () => {
+  const slice = starmapSlice();
+  const drawn = { images: 0, radial: 0 };
+  const ctx = {
+    createLinearGradient: () => ({ addColorStop() {} }),
+    createRadialGradient: () => {
+      drawn.radial += 1;
+      return { addColorStop() {} };
+    },
+    fillRect() {},
+    beginPath() {},
+    arc() {},
+    fill() {},
+    moveTo() {},
+    lineTo() {},
+    stroke() {},
+    drawImage() {
+      drawn.images += 1;
+    },
+    set fillStyle(value) {},
+    set strokeStyle(value) {},
+    set globalAlpha(value) {},
+    lineWidth: 1,
+  };
+  const nodes = [
+    { x: 30, y: 60, r: 6, hue: 190, sat: 30, alpha: 0.8, phase: 0 },
+    { x: 90, y: 50, r: 9, hue: 28, sat: 52, alpha: 0.6, phase: 1 },
+    { x: 60, y: 120, r: 1.6, hue: 218, sat: 11, alpha: 0.2, phase: 2 },
+  ];
+  const opts = { time: 1200, links: [[0, 1]], width: 320, height: 200, sprite: { width: 64, height: 64 }, focus: -1 };
+  vm.runInNewContext(slice + ";drawStarmapFrame(ctx, nodes, opts);", { ctx, nodes, opts, Math, Set, Map });
+  assert.equal(drawn.images, 2, "两颗真实星各盖一次贴图，空位不盖");
+  assert.equal(drawn.radial, 0, "有贴图就不该再逐颗建径向渐变");
+});
+
+test("星图：时间是每颗星各自漂移（≤3px），不是把整张图转一个角度", () => {
+  const slice = starmapSlice();
+  const shoot = (time) => {
+    const pts = [];
+    const ctx = {
+      createLinearGradient: () => ({ addColorStop() {} }),
+      createRadialGradient: () => ({ addColorStop() {} }),
+      fillRect() {},
+      beginPath() {},
+      arc() {},
+      fill() {},
+      moveTo() {},
+      lineTo() {},
+      stroke() {},
+      drawImage(sprite, x, y, w, h) {
+        pts.push({ x: x + w / 2, y: y + h / 2 });
+      },
+      set fillStyle(value) {},
+      set strokeStyle(value) {},
+      set globalAlpha(value) {},
+      lineWidth: 1,
+    };
+    // 三颗真实星分散在画布四角附近：整图旋转会让它们沿圆弧跑很远，漂移不会
+    const nodes = [
+      { x: 40, y: 40, r: 6, hue: 190, sat: 40, alpha: 0.8, phase: 0.4 },
+      { x: 280, y: 60, r: 8, hue: 28, sat: 50, alpha: 0.7, phase: 2.1 },
+      { x: 120, y: 220, r: 5, hue: 215, sat: 45, alpha: 0.9, phase: 4.4 },
+    ];
+    const opts = { time: time, links: [], width: 320, height: 260, sprite: { width: 64, height: 64 }, focus: -1 };
+    vm.runInNewContext(slice + ";drawStarmapFrame(ctx, nodes, opts);", { ctx, nodes, opts, Math, Set, Map });
+    return pts;
+  };
+  const home = [
+    { x: 40, y: 40 },
+    { x: 280, y: 60 },
+    { x: 120, y: 220 },
+  ];
+  let moved = 0;
+  for (const time of [0, 700, 1500, 2244, 3312, 5400]) {
+    const pts = shoot(time);
+    assert.equal(pts.length, 3, "三颗真实星各盖一次贴图");
+    for (let i = 0; i < pts.length; i += 1) {
+      // 与布局位置比：整图旋转会让边角的星跑出几十像素，漂移永远只差几个像素
+      const away = Math.hypot(pts[i].x - home[i].x, pts[i].y - home[i].y);
+      assert.ok(away <= 3, "第 " + i + " 颗在 t=" + time + " 偏离布局位置 " + away.toFixed(2) + "px");
+      if (away > 1) moved += 1;
+    }
+  }
+  assert.ok(moved > 0, "得真的在飘，不能一动不动");
+});
+
+test("星图：聚焦一颗星时，只有它和相连的星保持亮度", () => {
+  const slice = starmapSlice();
+  const shoot = (focus) => {
+    const alphas = [];
+    const ctx = {
+      createLinearGradient: () => ({ addColorStop() {} }),
+      createRadialGradient: () => ({ addColorStop() {} }),
+      fillRect() {},
+      beginPath() {},
+      arc() {},
+      fill() {},
+      moveTo() {},
+      lineTo() {},
+      stroke() {},
+      drawImage() {
+        alphas.push(ctx.alphaNow);
+      },
+      set fillStyle(value) {},
+      set strokeStyle(value) {},
+      set globalAlpha(value) {
+        ctx.alphaNow = value;
+      },
+      get globalAlpha() {
+        return ctx.alphaNow;
+      },
+      lineWidth: 1,
+    };
+    const nodes = [
+      { x: 60, y: 60, r: 8, hue: 190, sat: 30, alpha: 0.9, phase: 0 },
+      { x: 120, y: 60, r: 8, hue: 28, sat: 50, alpha: 0.9, phase: 1 },
+      { x: 90, y: 120, r: 8, hue: 215, sat: 50, alpha: 0.9, phase: 2 },
+      { x: 60, y: 140, r: 1.5, hue: 218, sat: 11, alpha: 0.2, phase: 3 },
+    ];
+    const opts = { time: 0, links: [[0, 1]], width: 200, height: 200, sprite: { width: 64, height: 64 }, focus: focus };
+    vm.runInNewContext(slice + ";drawStarmapFrame(ctx, nodes, opts);", { ctx, nodes, opts, Math, Set, Map });
+    return alphas;
+  };
+  const plain = shoot(-1);
+  const focused = shoot(0);
+  assert.equal(plain.length, 3, "三颗真实星各盖一次贴图（空位不盖）");
+  assert.equal(focused.length, 3);
+  assert.ok(Math.abs(focused[0] - plain[0]) < 1e-9, "聚焦的星保持亮度");
+  assert.ok(Math.abs(focused[1] - plain[1]) < 1e-9, "与它相连的星保持亮度");
+  assert.ok(focused[2] < plain[2] * 0.5, "不相干的星压到 0.45 以下：" + plain[2] + " -> " + focused[2]);
+});
+
+test("星图：没有贴图就回落渐变，三种残缺输入都不抛", () => {
+  const slice = starmapSlice();
+  const ctx = {
+    createLinearGradient: () => ({ addColorStop() {} }),
+    createRadialGradient: () => ({ addColorStop() {} }),
+    fillRect() {},
+    beginPath() {},
+    arc() {},
+    fill() {},
+    moveTo() {},
+    lineTo() {},
+    stroke() {},
+    set fillStyle(value) {},
+    set strokeStyle(value) {},
+    set globalAlpha(value) {},
+    lineWidth: 1,
+  };
+  const nodes = [{ x: 10, y: 10, r: 5, hue: 190, sat: 30, alpha: 0.7, phase: 0 }];
+  const base = { time: 0, links: [], width: 200, height: 120 };
+  for (const opts of [base, Object.assign({}, base, { sprite: null }), Object.assign({}, base, { sprite: { width: 0 } })]) {
+    assert.doesNotThrow(() => vm.runInNewContext(slice + ";drawStarmapFrame(ctx, nodes, opts);", { ctx, nodes, opts, Math, Set, Map }));
+  }
+});
+
+test("星图：点中一颗星才显示正文 / 层 / 时间", () => {
+  const { renderStarmapBody, formatStamp } = loadClient().exports.__test;
+  const h = makeReact().createElement;
+  const base = { status: "ready", total: 1, truncated: false, stars: [], links: [], picked: null };
+  assert.ok(texts(renderStarmapBody(base, h, null)).includes("点一颗星"), "没选中时给一句提示");
+  const star = { id: "a", text: "用户说周末想去海边走走", tier: "hot", at: 1738312800000 };
+  const on = texts(renderStarmapBody(Object.assign({}, base, { picked: star }), h, null));
+  assert.ok(on.includes("用户说周末想去海边走走"), "正文要有：" + on);
+  assert.ok(on.includes("热记忆"), "层要翻成人话，不把 hot 直接甩出来");
+  assert.ok(on.includes(formatStamp(star.at)), "时间要按本地时区给");
+  assert.equal(on.includes("点一颗星"), false, "选中后提示要让位给详情");
+});
+
+
+test("星图：空位数量随真实记忆递减，60 条起归零，且都是确定的", () => {
+  const { unlitCount, unlitStars } = loadClient().exports.__test;
+  assert.equal(unlitCount(0), 44);
+  assert.equal(unlitCount(16), 44, "16 条真实记忆时正好补满 44 个空位");
+  assert.equal(unlitCount(30), 30);
+  assert.equal(unlitCount(59), 1);
+  assert.equal(unlitCount(60), 0, "60 条起一个空位都不摆");
+  assert.equal(unlitCount(999), 0);
+  for (let real = 0; real < 80; real += 1) assert.ok(unlitCount(real + 1) <= unlitCount(real), "只能越攒越少");
+  assert.equal(JSON.stringify(unlitStars(44)), JSON.stringify(unlitStars(44)), "同一批索引每次长一样");
+  const first = unlitStars(3)[0];
+  assert.ok(first.id.indexOf("unlit-") === 0, "空位 id 前缀：" + first.id);
+  assert.ok(first.r >= 1.2 && first.r <= 2.2, "空位半径：" + first.r);
+  assert.ok(first.alpha >= 0.2 && first.alpha <= 0.3, "空位透明度 0.20~0.30：" + first.alpha);
+  assert.ok(first.sat >= 8 && first.sat <= 16, "空位饱和度：" + first.sat);
+});
+
+test("星图：真实记忆到 60 条，layout 一个空位都不补", () => {
+  const { layoutUniverse } = loadClient().exports.__test;
+  const many = Array.from({ length: 60 }, (_, i) => ({ id: "m" + i, tier: "hot", kind: "turn", tags: [], weight: 0.5, mentions: 0, pinned: false, valence: 0, arousal: 0.3 }));
+  const layout = layoutUniverse(many, [["m0", "m1"]], 520, 300);
+  assert.equal(layout.unlitIds.length, 0, "60 条真实记忆时不该再补空位");
+  assert.equal(layout.nodes.length, 60, "画布上只有真实星");
+  assert.equal(JSON.stringify(layout.links), "[[0,1]]");
+});
+
+test("星图：停在空位上只说一句「还未点亮的记忆」，移开就回原详情", () => {
+  const { renderStarmapBody } = loadClient().exports.__test;
+  const h = makeReact().createElement;
+  const base = { status: "ready", total: 1, truncated: false, stars: [], links: [], picked: { id: "a", text: "用户说周末想去海边走走", tier: "hot", at: 1738312800000 } };
+  const on = texts(renderStarmapBody(Object.assign({}, base, { hoverUnlit: true }), h, null));
+  assert.ok(on.includes("还未点亮的记忆"), on);
+  assert.equal(on.includes("用户说周末想去海边走走"), false, "空位不许带出真实记忆的正文");
+  assert.equal(on.includes("热记忆"), false, "也不给层与时间");
+  const off = texts(renderStarmapBody(base, h, null));
+  assert.ok(off.includes("用户说周末想去海边走走"), "移开后回到原来的详情");
+  assert.equal(off.includes("还未点亮的记忆"), false);
+});
+
+
+test("星图：指针真的停在空位上时，详情换成那句话，移开就回原样", async () => {
+  const universe = {
+    ok: true,
+    total: 1,
+    truncated: false,
+    stars: [{ id: "a1", text: "用户说周末想去海边走走", kind: "turn", tier: "hot", weight: 0.8, mentions: 2, pinned: false, valence: 0.6, arousal: 0.8, at: 1738312800000, tags: ["海边"] }],
+    links: [],
+  };
+  const { render } = await mountPanel((opt, body) => {
+    if (body && body.action === "universe") return { body: universe };
+    return { body: { stats: { count: 1 }, budget: {}, vector: { state: "on" }, recalls: [] } };
+  });
+  buttonByText(render(), "星图").props.onClick();
+  render();
+  await tick();
+
+  // 画布是假 DOM：记下监听器，按需要回调
+  const listeners = {};
+  const rect = { left: 10, top: 20, width: 520, height: 300 };
+  const ctx = {
+    setTransform() {},
+    createLinearGradient: () => ({ addColorStop() {} }),
+    createRadialGradient: () => ({ addColorStop() {} }),
+    fillRect() {},
+    beginPath() {},
+    arc() {},
+    fill() {},
+    moveTo() {},
+    lineTo() {},
+    stroke() {},
+    set fillStyle(value) {},
+    set strokeStyle(value) {},
+    lineWidth: 1,
+  };
+  const canvas = {
+    width: 0,
+    height: 0,
+    getContext: () => ctx,
+    getBoundingClientRect: () => rect,
+    addEventListener: (name, fn) => { listeners[name] = fn; },
+    removeEventListener: () => {},
+  };
+
+  // 模拟 React 挂 ref，再渲染一次让 effect 拿到画布
+  const first = render();
+  findAll(first, (n) => n.tag === "canvas")[0].props.ref(canvas);
+  render();
+  for (const name of ["pointermove", "pointerdown", "click", "pointerleave"]) {
+    assert.equal(typeof listeners[name], "function", "画布该挂上 " + name);
+  }
+
+  // 布局是确定的，所以能算出空位在哪
+  const { normalizeUniverse, layoutUniverse } = loadClient().exports.__test;
+  const model = normalizeUniverse(universe);
+  const layout = layoutUniverse(model.stars, model.links, rect.width, rect.height);
+  const unlitId = layout.unlitIds[0];
+  const at = layout.nodes[layout.ids.indexOf(unlitId)];
+  listeners.pointermove({ clientX: rect.left + at.x, clientY: rect.top + at.y });
+  const hovering = texts(render());
+  assert.ok(hovering.includes("还未点亮的记忆"), hovering.slice(0, 200));
+  assert.equal(hovering.includes("点一颗星"), false, "停到空位上时不该还是那句提示");
+
+  listeners.pointerleave();
+  const left = texts(render());
+  assert.ok(left.includes("点一颗星，看它记得什么。"), "移开后回到未选中态");
+  assert.equal(left.includes("还未点亮的记忆"), false);
+
+  // 停在真实星上不该触发空位文案
+  const realAt = layout.nodes[0];
+  listeners.pointermove({ clientX: rect.left + realAt.x, clientY: rect.top + realAt.y });
+  assert.equal(texts(render()).includes("还未点亮的记忆"), false, "真实星不走空位那条路");
+});
+
+
+/**
+ * 更贴近 React 的 hooks 桩：记住每个 effect 的依赖数组，
+ * 依赖变了就先跑上一次的 cleanup 再重跑。mountPanel 那个桩不认依赖与 cleanup，
+ * 「effect 把自己重跑掉、结果被 alive=false 丢掉」这类 bug 在它下面看不见。
+ */
+function mountWithDeps() {
+  const state = [];
+  const effects = [];
+  let ui = 0;
+  let ei = 0;
+  const react = {
+    createElement: (tag, props, ...children) => ({ tag, props: props || {}, children: children.flat(Infinity) }),
+    useState: (initial) => {
+      const i = ui;
+      ui += 1;
+      if (!(i in state)) state[i] = initial;
+      return [state[i], (next) => { state[i] = typeof next === "function" ? next(state[i]) : next; }];
+    },
+    useEffect: (fn, deps) => {
+      const i = ei;
+      ei += 1;
+      const prev = effects[i];
+      const same = !!(prev && deps && prev.deps && deps.length === prev.deps.length && deps.every((d, k) => d === prev.deps[k]));
+      if (same) return;
+      if (prev && typeof prev.cleanup === "function") prev.cleanup();
+      effects[i] = { deps: deps ? deps.slice() : null, cleanup: fn() };
+    },
+  };
+  return {
+    react,
+    state,
+    render: (component) => {
+      ui = 0;
+      ei = 0;
+      return component();
+    },
+  };
+}
+
+test("星图：取数在 React 的真实顺序里也要落到 ready（effect 重跑不许吞掉结果）", async () => {
+  const universe = {
+    ok: true,
+    total: 2,
+    truncated: false,
+    stars: [
+      { id: "a1", text: "用户说周末想去海边走走", kind: "turn", tier: "hot", weight: 0.8, mentions: 2, pinned: false, valence: 0.6, arousal: 0.8, at: 1738312800000, tags: ["海边"] },
+      { id: "b2", text: "用户最近在学手冲咖啡", kind: "turn", tier: "cold", weight: 0.4, mentions: 0, pinned: false, valence: -0.2, arousal: 0.3, at: 1738312900000, tags: ["咖啡"] },
+    ],
+    links: [["a1", "b2"]],
+  };
+  const sent = [];
+  const fetchImpl = async (url, options) => {
+    const opt = options || {};
+    let body = null;
+    try {
+      body = opt.body ? JSON.parse(opt.body) : null;
+    } catch {
+      body = null;
+    }
+    sent.push({ method: opt.method || "GET", body });
+    const payload = body && body.action === "universe" ? universe : { stats: { count: 2 }, budget: {}, vector: { state: "on" }, recalls: [] };
+    return { ok: true, status: 200, text: async () => JSON.stringify(payload) };
+  };
+  const harness = mountWithDeps();
+  const client = loadClient({ react: harness.react, extra: { fetch: fetchImpl } });
+  const captured = [];
+  client.exports.apply({ get: () => ({ inject: (n, f) => captured.push(f), register: (d, c) => ({ d, c }) }) });
+  const component = componentOf(captured, "settings.section").component;
+  const render = () => harness.render(component);
+
+  let tree = render();
+  buttonByText(tree, "星图").props.onClick();
+  tree = render();
+  assert.ok(texts(tree).includes("正在把记忆排成星空"), "起请求时先给一句等待");
+  // 关键一步：setState 会让 React 立刻再渲染一次，旧写法在这里就跑到了 cleanup
+  render();
+  await tick();
+  tree = render();
+
+  assert.equal(harness.state[3].status, "ready", "请求回来后必须是 ready，不能停在 loading");
+  assert.ok(harness.state[3].stars && harness.state[3].stars.length === 2, "画布数据不许是空的");
+  const flat = texts(tree);
+  assert.ok(flat.includes("记忆星图 · 2 颗"), flat.slice(0, 240));
+  assert.equal(flat.includes("正在把记忆排成星空"), false, "不许再停在等待文案");
+  assert.equal(findAll(tree, (n) => n.tag === "canvas").length, 1);
+  assert.equal(sent.filter((p) => p.body && p.body.action === "universe").length, 1, "只问一次宿主");
+});
+
+
+test("星图：失败后按重试会重新问一次，并且落到 ready", async () => {
+  let fail = true;
+  const { calls, render } = await mountPanel((opt, body) => {
+    if (body && body.action === "universe") {
+      if (fail) return { status: 503, body: { ok: false, error: "宿主忙" } };
+      return {
+        body: {
+          ok: true,
+          total: 1,
+          truncated: false,
+          stars: [{ id: "a1", text: "用户说周末想去海边走走", tier: "hot", kind: "turn", weight: 0.5, mentions: 0, pinned: false, valence: 0.2, arousal: 0.4, at: 1738312800000, tags: [] }],
+          links: [],
+        },
+      };
+    }
+    return { body: { stats: { count: 1 }, budget: {}, vector: { state: "on" }, recalls: [] } };
+  });
+  buttonByText(render(), "星图").props.onClick();
+  render();
+  await tick();
+  assert.ok(texts(render()).includes("星图没取到"), "先落到失败态");
+
+  fail = false;
+  buttonByText(render(), "重试").props.onClick();
+  await tick();
+  const flat = texts(render());
+  assert.ok(flat.includes("记忆星图 · 1 颗"), "重试后要真的到 ready：" + flat.slice(0, 200));
+  assert.equal(flat.includes("星图没取到"), false);
+  assert.equal(calls.filter((c) => c.body && c.body.action === "universe").length, 2, "失败一次 + 重试一次");
+});
+
+test("星图：createStarSprite 用离屏画布造贴图，没有 document 时返回 null", () => {
+  const fakeCanvas = {
+    width: 0,
+    height: 0,
+    getContext: () => ({ createRadialGradient: () => ({ addColorStop() {} }), fillRect() {}, set fillStyle(value) {} }),
+  };
+  const withDoc = loadClient({ extra: { document: { baseURI: "http://127.0.0.1:52603/", createElement: () => fakeCanvas } } });
+  assert.equal(typeof withDoc.exports.__test.createStarSprite, "function", "视觉验收要直接拿它造贴图");
+  const sprite = withDoc.exports.__test.createStarSprite(64);
+  assert.ok(sprite, "应当返回一块画布");
+  assert.equal(sprite.width, 64);
+  assert.equal(sprite.height, 64);
+
+  const noDoc = loadClient().exports.__test.createStarSprite(64);
+  assert.equal(noDoc, null, "没有 document 就返回 null，绘制自动回落渐变");
+});
+
+test("星图：图例说清亮暗，且不出现任何数字进度", () => {
+  const { renderStarmapBody } = loadClient().exports.__test;
+  const flat = texts(renderStarmapBody({ status: "ready", total: 3, truncated: false, stars: [], links: [] }, makeReact().createElement, null));
+  assert.ok(flat.includes("亮的是记得的事，暗的是还没点亮的空位"), flat);
+  for (const bad of ["再攒", "还差", "进度", "点亮还"]) assert.equal(flat.includes(bad), false, "不许出现进度文案：" + bad);
+});
+

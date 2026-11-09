@@ -34,8 +34,10 @@ import { fileURLToPath } from "node:url";
 
 const PLUGIN = "dsh-mnemos";
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-/** 宿主自带运行时：本机 PATH 里没有 node / pnpm，一律用绝对路径。 */
-const RUNTIME_DIR = "/Users/tle/.dsh/dsh-runtimes/dsh-primary-runtime/dependencies";
+/** 宿主自带运行时：本机 PATH 里没有 node / pnpm 时用它。可用 DSH_RUNTIME_DIR 覆盖。 */
+const RUNTIME_DIR =
+  process.env.DSH_RUNTIME_DIR ||
+  join(process.env.DSH_HOME || join(homedir(), ".dsh"), "dsh-runtimes", "dsh-primary-runtime", "dependencies");
 const DEFAULT_NODE = join(RUNTIME_DIR, "node", "bin", "node");
 const DEFAULT_PNPM = join(RUNTIME_DIR, "pnpm", "bin", "pnpm.mjs");
 /** 只有 --no-pnpm 的降级路径才会复制文件；正常路径由 pnpm 从仓库生成。 */

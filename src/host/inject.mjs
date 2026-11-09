@@ -171,6 +171,9 @@ export function rankRecords(input = {}) {
     vectors: null,
     now,
     heatOf: safeHeat,
+    // 情绪与权重都由调用方给：没人传 mood 时 rank 把它整份排除在归一之外
+    mood: input.mood,
+    weights: input.weights,
   });
   const limit = Number.isFinite(input.limit) ? Math.max(0, Math.floor(input.limit)) : rows.length;
   return rows.slice(0, limit);
@@ -279,7 +282,7 @@ export function renderInjection(options = {}) {
 
   const ranked = options.ranked
     ? options.ranked
-    : rankRecords({ query: options.query, records, index: options.index, now, limit: RANK_POOL });
+    : rankRecords({ query: options.query, records, index: options.index, now, limit: RANK_POOL, mood: options.mood, weights: options.weights });
   // 调用方直接塞 ranked 时也要挡住常驻层：top 决定主动召回档位，不能是设定
   const rows = Array.isArray(ranked) ? ranked.filter((row) => row && row.record && !isPersistent(row.record)) : [];
   const top = rows[0] || null;
