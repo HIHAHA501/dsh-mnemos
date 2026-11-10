@@ -4,11 +4,18 @@
  * 2) 桥接层（src/persona-bridge.mjs）—— 取快照与出计划。
  */
 import assert from "node:assert/strict";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 
 import { CONFIG_DEFAULTS, resolveConfig } from "../../src/config.mjs";
 import { hashOf, isLoopbackUrl, PERSONA_DEFAULTS, PERSONA_SOURCE_KEY, planPersonaRecord, readPersonaSource, resolvePersonaUrl } from "../../src/persona-bridge.mjs";
 import { createRecord, normalizeMeta } from "../../src/record.mjs";
+
+// 临时目录按平台取（Windows 上 "/tmp/x" 是 C:\tmp\x，不是 %TEMP%）
+const DATA_DIR = join(tmpdir(), "dsh-mnemos-persona");
+const PERSONA_FILE = join(tmpdir(), "persona.txt");
+const PERSONA_FILE_SHORT = join(tmpdir(), "p");
 
 /* ================================================= 组一：meta 放行（record.mjs） */
 
@@ -116,8 +123,8 @@ test("persona: 未知 kind 也按 disabled 处理", async () => {
 });
 
 test("persona: file 读取成功 → ok + text + hash", async () => {
-  const result = await readPersonaSource(personaConfig({ kind: "file", path: "/tmp/persona.txt" }), {
-    readFile: async function (path) { assert.equal(path, "/tmp/persona.txt"); return "  她叫林深，说话简短  "; },
+  const result = await readPersonaSource(personaConfig({ kind: "file", path: PERSONA_FILE }), {
+    readFile: async function (path) { assert.equal(path, PERSONA_FILE); return "  她叫林深，说话简短  "; },
   });
   assert.equal(result.ok, true);
   assert.equal(result.text, "她叫林深，说话简短");
@@ -240,14 +247,14 @@ test("persona: 注入的 signalOf 真的被用上（耗时远低于 timeoutMs，
 });
 
 test("persona: 空文本 → empty", async () => {
-  const result = await readPersonaSource(personaConfig({ kind: "file", path: "/tmp/p" }), { readFile: async function () { return "    "; } });
+  const result = await readPersonaSource(personaConfig({ kind: "file", path: PERSONA_FILE_SHORT }), { readFile: async function () { return "    "; } });
   assert.equal(result.ok, false);
   assert.equal(result.code, "empty");
 });
 
 test("persona: 超过 maxChars 被截断，hash 对应截断后的文本", async () => {
   const long = "阿".repeat(500);
-  const result = await readPersonaSource(personaConfig({ kind: "file", path: "/tmp/p", maxChars: 200 }), { readFile: async function () { return long; } });
+  const result = await readPersonaSource(personaConfig({ kind: "file", path: PERSONA_FILE_SHORT, maxChars: 200 }), { readFile: async function () { return long; } });
   assert.equal(result.ok, true);
   assert.equal(result.text.length, 200);
   assert.equal(result.hash, hashOf(result.text));
@@ -292,17 +299,17 @@ test("plan: 纯函数——不改入参", () => {
 });
 
 test("config: persona 默认值、钳位与非法枚举回退", () => {
-  const config = resolveConfig({ dataDir: "/tmp/x" });
+  const config = resolveConfig({ dataDir: DATA_DIR });
   assert.deepEqual({ ...config.persona }, { ...PERSONA_DEFAULTS });
   assert.equal(config.mode, "general", "顶层 mode 不受影响");
-  const clamped = resolveConfig({ dataDir: "/tmp/x", persona: { timeoutMs: 50, maxChars: 99999 } });
+  const clamped = resolveConfig({ dataDir: DATA_DIR, persona: { timeoutMs: 50, maxChars: 99999 } });
   assert.equal(clamped.persona.timeoutMs, 200);
   assert.equal(clamped.persona.maxChars, 20000);
-  const fallback = resolveConfig({ dataDir: "/tmp/x", persona: { mode: "bogus", kind: "nope", refresh: "sometimes" } });
+  const fallback = resolveConfig({ dataDir: DATA_DIR, persona: { mode: "bogus", kind: "nope", refresh: "sometimes" } });
   assert.equal(fallback.persona.mode, "self");
   assert.equal(fallback.persona.kind, "none");
   assert.equal(fallback.persona.refresh, "startup");
-  const external = resolveConfig({ dataDir: "/tmp/x", persona: { mode: "external", kind: "http", url: "http://127.0.0.1:9/p", refresh: "turn" } });
+  const external = resolveConfig({ dataDir: DATA_DIR, persona: { mode: "external", kind: "http", url: "http://127.0.0.1:9/p", refresh: "turn" } });
   assert.equal(external.persona.mode, "external");
   assert.equal(external.persona.kind, "http");
   assert.equal(external.persona.refresh, "turn");
@@ -401,9 +408,9 @@ test("persona: 相对 url 由桥自己解析（deps.origin），拿不到 origin
 });
 
 test("config: persona.adapter 默认 text，非法值回退 text", () => {
-  const config = resolveConfig({ dataDir: "/tmp/x" });
+  const config = resolveConfig({ dataDir: DATA_DIR });
   assert.equal(config.persona.adapter, "text");
-  assert.equal(resolveConfig({ dataDir: "/tmp/x", persona: { adapter: "dafeiyu" } }).persona.adapter, "dafeiyu");
-  assert.equal(resolveConfig({ dataDir: "/tmp/x", persona: { adapter: "bogus" } }).persona.adapter, "text");
+  assert.equal(resolveConfig({ dataDir: DATA_DIR, persona: { adapter: "dafeiyu" } }).persona.adapter, "dafeiyu");
+  assert.equal(resolveConfig({ dataDir: DATA_DIR, persona: { adapter: "bogus" } }).persona.adapter, "text");
 });
 

@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
@@ -7,6 +9,9 @@ import { CONFIG_DEFAULTS, resolveConfig } from "../../src/config.mjs";
 import { heatOf } from "../../src/heat.mjs";
 import { normalizeRecord, TIER_SOURCES } from "../../src/record.mjs";
 import { applyTiering, reviveOnMentionPatch, TIER_DEFAULTS } from "../../src/tiering.mjs";
+
+// 临时目录按平台取（Windows 上 "/tmp/x" 是 C:\tmp\x，不是 %TEMP%）
+const DATA_DIR = join(tmpdir(), "dsh-mnemos-tiering");
 
 const DAY = 86400000;
 const NOW = 1700000000000;
@@ -158,12 +163,12 @@ test("record: tierSource 缺省 auto、非法回退 auto、user 保留", () => {
 });
 
 test("config: tiering 默认值取自 TIER_DEFAULTS，非法值被夹住", () => {
-  const config = resolveConfig({ dataDir: "/tmp/x" });
+  const config = resolveConfig({ dataDir: DATA_DIR });
   assert.deepEqual({ ...config.tiering }, { ...TIER_DEFAULTS });
   assert.deepEqual({ ...CONFIG_DEFAULTS.tiering }, { ...TIER_DEFAULTS });
   assert.equal(config.injectTokenBudget, 600, "既有字段不受影响");
   const clamped = resolveConfig({
-    dataDir: "/tmp/x",
+    dataDir: DATA_DIR,
     tiering: { demoteAfterDays: -9, demoteBelowHeat: 2, coldWeight: -1, enabled: false },
   });
   assert.deepEqual({ ...clamped.tiering }, {
@@ -173,7 +178,7 @@ test("config: tiering 默认值取自 TIER_DEFAULTS，非法值被夹住", () =>
     coldWeight: 0,
     reviveOnMention: true,
   });
-  assert.equal(resolveConfig({ dataDir: "/tmp/x", tiering: { demoteAfterDays: 99999 } }).tiering.demoteAfterDays, 3650);
+  assert.equal(resolveConfig({ dataDir: DATA_DIR, tiering: { demoteAfterDays: 99999 } }).tiering.demoteAfterDays, 3650);
 });
 
 test("tiering: 只 import heat.mjs 这一个本地模块", () => {

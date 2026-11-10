@@ -14,6 +14,9 @@ import { createId, createRecord, normalizeRecord } from "../../src/record.mjs";
 const DAY = 86400000;
 const NOW = 1700000000000;
 
+// 临时目录按平台取：Windows 上写死 "/tmp/x" 会落到当前盘根的 C:\tmp\x，不是用户的临时目录
+const ENV_DATA_DIR = join(tmpdir(), "dsh-mnemos-env");
+
 function approx(actual, expected, epsilon = 1e-9) {
   assert.ok(Math.abs(actual - expected) <= epsilon, "期望 " + expected + "，实际 " + actual);
 }
@@ -29,7 +32,7 @@ function tempDir(t) {
 }
 
 test("config: 默认值与契约逐字一致", () => {
-  const config = resolveConfig({}, { env: { DSH_MNEMOS_DATA_DIR: "/tmp/mnemos-test" } });
+  const config = resolveConfig({}, { env: { DSH_MNEMOS_DATA_DIR: ENV_DATA_DIR } });
   assert.equal(config.enabled, CONFIG_DEFAULTS.enabled);
   assert.equal(config.enabled, true);
   assert.equal(config.mode, "general");
@@ -42,7 +45,7 @@ test("config: 默认值与契约逐字一致", () => {
   assert.equal(config.moodWeight, 0.15);
   assert.deepEqual({ ...config.ingest }, { llm: "auto", everyTurns: 20, capture: true, filter: true, skipSubagentSessions: true });
   assert.equal(config.debug, false);
-  assert.equal(config.dataDir, "/tmp/mnemos-test");
+  assert.equal(config.dataDir, ENV_DATA_DIR);
 });
 
 test("config: 脏值被钳位或回退，且不抛异常", () => {
@@ -57,7 +60,7 @@ test("config: 脏值被钳位或回退，且不抛异常", () => {
       proactive: { quoteThreshold: 3, maxPerTurn: "x" },
       ingest: { everyTurns: 0 },
     },
-    { env: { DSH_MNEMOS_DATA_DIR: "/tmp/mnemos-test" }, warnings },
+    { env: { DSH_MNEMOS_DATA_DIR: ENV_DATA_DIR }, warnings },
   );
   assert.equal(config.mode, "general");
   assert.equal(config.hotTokenBudget, 0);
@@ -72,7 +75,7 @@ test("config: 脏值被钳位或回退，且不抛异常", () => {
 });
 
 test("config: 解析结果是冻结的", () => {
-  const config = resolveConfig({}, { env: { DSH_MNEMOS_DATA_DIR: "/tmp/mnemos-test" } });
+  const config = resolveConfig({}, { env: { DSH_MNEMOS_DATA_DIR: ENV_DATA_DIR } });
   assert.ok(Object.isFrozen(config));
   assert.ok(Object.isFrozen(config.proactive));
   assert.throws(() => {

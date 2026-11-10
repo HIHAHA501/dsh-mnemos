@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
+import { tmpdir } from 'node:os';
 
 import { tokenize } from '../../src/retrieval/tokenize.mjs';
 import { createBm25 } from '../../src/retrieval/bm25.mjs';
@@ -183,7 +184,7 @@ test('vector.status: local 不可加载 -> degraded 且原因具体', () => {
   assert.equal(s1.state, 'degraded');
   assert.match(s1.reason, /^local:/);
 
-  const noRuntime = createVector({ config: { vector: { provider: 'local', model: '/tmp/not-a-model.onnx' } } });
+  const noRuntime = createVector({ config: { vector: { provider: 'local', model: join(tmpdir(), 'not-a-model.onnx') } } });
   const s2 = noRuntime.status();
   assert.equal(s2.state, 'degraded');
   assert.match(s2.reason, /^local:/);

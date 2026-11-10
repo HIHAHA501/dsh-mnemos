@@ -19,6 +19,9 @@ import { TOOL_NAMES } from "../../src/host/tools.mjs";
 
 const NOW = 1700000000000;
 
+// 临时目录按平台取（Windows 上 "/tmp/x" 是 C:\tmp\x，不是 %TEMP%）
+const DATA_DIR = join(tmpdir(), "dsh-mnemos-host");
+
 function tempDir(t) {
   const dir = mkdtempSync(join(tmpdir(), "dsh-mnemos-host-"));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
@@ -215,7 +218,7 @@ test("③b 预算小到装不下指令时宁可不注入", (t) => {
 /* ------------------------------------------------------- ④ 三态阈值边界 */
 
 test("④ proactive 三态阈值边界", (t) => {
-  const config = resolveConfig({ dataDir: "/tmp/x", proactive: { quoteThreshold: 0.62, askThreshold: 0.45, noiseFloor: 0.18 } });
+  const config = resolveConfig({ dataDir: DATA_DIR, proactive: { quoteThreshold: 0.62, askThreshold: 0.45, noiseFloor: 0.18 } });
   assert.equal(decide({ score: 0.62, config, text: "普通记忆" }).state, "quote", "等于引用阈值就进引用档");
   assert.equal(decide({ score: 0.619, config, text: "普通记忆" }).state, "ask");
   assert.equal(decide({ score: 0.45, config, text: "普通记忆" }).state, "ask", "等于试探阈值就进试探档");
@@ -223,14 +226,14 @@ test("④ proactive 三态阈值边界", (t) => {
   assert.equal(decide({ score: 0.18, config, text: "普通记忆" }).state, "silence", "噪声阈值是排斥边界");
   assert.equal(decide({ score: 0.18, config, text: "普通记忆" }).reason, "noise");
   assert.equal(decide({ score: Number.NaN, config, text: "普通记忆" }).state, "silence");
-  const reversed = resolveConfig({ dataDir: "/tmp/x", proactive: { quoteThreshold: 0.3, askThreshold: 0.9, noiseFloor: 0.1 } });
+  const reversed = resolveConfig({ dataDir: DATA_DIR, proactive: { quoteThreshold: 0.3, askThreshold: 0.9, noiseFloor: 0.1 } });
   assert.equal(decide({ score: 0.5, config: reversed, text: "普通记忆" }).state, "ask", "阈值配反时按更严的那档判引用");
 });
 
 /* ------------------------------------------------- ⑧ 想不起约束不进引用档 */
 
 test("⑧ 文本里含「想不起」约束时不出现在 quote 分支", (t) => {
-  const config = resolveConfig({ dataDir: "/tmp/x" });
+  const config = resolveConfig({ dataDir: DATA_DIR });
   assert.equal(hasRecallConstraint("用户说他记不清那天了"), true);
   const decision = decide({ score: 0.95, config, text: "这件事你想不起来了，只记得大概" });
   assert.equal(decision.state, "ask");
@@ -445,7 +448,7 @@ test("debug 关闭时一条日志都不写；打开时才写", (t) => {
 /* ------------------------------------------------- 渲染口径（非 JSON dump） */
 
 test("渲染块是中文指令 + 事实，单块 ≤ 600 字，且带不确定约束", (t) => {
-  const config = resolveConfig({ dataDir: "/tmp/x", mode: "companion" });
+  const config = resolveConfig({ dataDir: DATA_DIR, mode: "companion" });
   const now = Date.now();
   const records = [
     createRecord({ kind: "profile", tier: "persona", subject: "self", text: "你叫林深，说话简短", weight: 0.9, createdAt: now, updatedAt: now }, { now }),
@@ -625,7 +628,7 @@ function personaFixtures(now) {
 }
 
 test("预算⑨：人设块受 hotTokenBudget、召回块受 injectTokenBudget 约束", (t) => {
-  const config = resolveConfig({ dataDir: "/tmp/x", mode: "companion", hotTokenBudget: 60, injectTokenBudget: 120 });
+  const config = resolveConfig({ dataDir: DATA_DIR, mode: "companion", hotTokenBudget: 60, injectTokenBudget: 120 });
   const now = Date.now();
   const records = personaFixtures(now);
   const index = createRetrievalIndex({ config });
@@ -639,7 +642,7 @@ test("预算⑨：人设块受 hotTokenBudget、召回块受 injectTokenBudget �
 });
 
 test("预算⑩：超 hotTokenBudget 的人设条目记进 dropped（reason=hot-budget）", (t) => {
-  const config = resolveConfig({ dataDir: "/tmp/x", mode: "companion", hotTokenBudget: 60, injectTokenBudget: 120 });
+  const config = resolveConfig({ dataDir: DATA_DIR, mode: "companion", hotTokenBudget: 60, injectTokenBudget: 120 });
   const now = Date.now();
   const records = personaFixtures(now);
   const index = createRetrievalIndex({ config });
@@ -653,7 +656,7 @@ test("预算⑩：超 hotTokenBudget 的人设条目记进 dropped（reason=hot-
 });
 
 test("预算⑪：召回预算装不下指令行时只砍召回，人设段照旧", (t) => {
-  const config = resolveConfig({ dataDir: "/tmp/x", mode: "companion", hotTokenBudget: 60, injectTokenBudget: 4 });
+  const config = resolveConfig({ dataDir: DATA_DIR, mode: "companion", hotTokenBudget: 60, injectTokenBudget: 4 });
   const now = Date.now();
   const records = personaFixtures(now);
   const index = createRetrievalIndex({ config });
@@ -705,7 +708,7 @@ function plainMessage(role, text, id) {
 }
 
 function toolCallMessage(id) {
-  return { id: "call-" + id, role: "assistant", content: [{ type: "tool-call", id, name: "read", arguments: { path: "/tmp/" + id } }] };
+  return { id: "call-" + id, role: "assistant", content: [{ type: "tool-call", id, name: "read", arguments: { path: join(tmpdir(), id) } }] };
 }
 
 function toolResultMessage(id) {
@@ -854,18 +857,18 @@ test("投影⑦：折叠消息受 maxFoldedTokens 约束，且写明「不是遗
 });
 
 test("投影⑧：projection 默认值保守，非法值被夹住且不影响既有字段", () => {
-  const config = resolveConfig({ dataDir: "/tmp/x" });
+  const config = resolveConfig({ dataDir: DATA_DIR });
   assert.deepEqual({ ...config.projection }, { enabled: true, triggerTokens: 6000, keepRecentTurns: 8, maxFoldedTokens: 400 });
   assert.equal(config.injectTokenBudget, 600);
   assert.equal(config.hotTokenBudget, 1200);
-  const custom = resolveConfig({ dataDir: "/tmp/x", projection: { triggerTokens: -5, keepRecentTurns: "3" } });
+  const custom = resolveConfig({ dataDir: DATA_DIR, projection: { triggerTokens: -5, keepRecentTurns: "3" } });
   assert.equal(custom.projection.triggerTokens, 0);
   assert.equal(custom.projection.keepRecentTurns, 3);
   assert.equal(custom.projection.enabled, true);
 });
 
 test("投影⑨：折叠要点取自本会话记录", () => {
-  const config = resolveConfig({ dataDir: "/tmp/x", projection: { triggerTokens: 2000 } });
+  const config = resolveConfig({ dataDir: DATA_DIR, projection: { triggerTokens: 2000 } });
   const records = [{ sessionId: "s1", text: "用户养了一只叫年糕的橘猫" }];
   const out = projectMessages({ messages: longConversation(24), records, config });
   assert.equal(out.changed, true);
@@ -875,7 +878,7 @@ test("投影⑨：折叠要点取自本会话记录", () => {
 });
 
 test("投影⑩：未超触发线时原样返回（引用相等）", () => {
-  const config = resolveConfig({ dataDir: "/tmp/x" });
+  const config = resolveConfig({ dataDir: DATA_DIR });
   const messages = [plainMessage("user", "短", "x1"), plainMessage("assistant", "也短", "x2")];
   const out = projectMessages({ messages, config });
   assert.equal(out.changed, false);
@@ -1540,7 +1543,7 @@ test("注入让位：external 下记忆段与召回段照旧", () => {
 
 test("注入让位：mode=self 时与不写 persona 字段逐字一致", () => {
   const withoutPersona = renderInjection(injectionInput({}));
-  const withSelf = renderInjection(injectionInput({ persona: { mode: "self", kind: "file", path: "/tmp/x" } }));
+  const withSelf = renderInjection(injectionInput({ persona: { mode: "self", kind: "file", path: DATA_DIR } }));
   assert.equal(withSelf.text, withoutPersona.text);
   assert.equal(withSelf.tokens, withoutPersona.tokens);
   assert.equal(withSelf.hotTokens, withoutPersona.hotTokens);
@@ -2284,7 +2287,7 @@ function tierFixture(now) {
 
 test("常驻层①：rankRecords 不返回 persona/state", () => {
   const now = Date.now();
-  const config = resolveConfig({ dataDir: "/tmp/x" });
+  const config = resolveConfig({ dataDir: DATA_DIR });
   const records = tierFixture(now);
   records.push(createRecord({ kind: "profile", tier: "state", subject: "self", text: "现在是深夜，她说累了", weight: 0.9, createdAt: now, updatedAt: now }, { now }));
   const index = createRetrievalIndex({ config });
@@ -2295,7 +2298,7 @@ test("常驻层①：rankRecords 不返回 persona/state", () => {
 
 test("常驻层②：persona 与 hot 都在时，只把 hot 当作往事（persona 只出现在人设段）", () => {
   const now = Date.now();
-  const config = resolveConfig({ dataDir: "/tmp/x", mode: "companion" });
+  const config = resolveConfig({ dataDir: DATA_DIR, mode: "companion" });
   const records = tierFixture(now);
   const index = createRetrievalIndex({ config });
   index.load(records);
@@ -2309,7 +2312,7 @@ test("常驻层②：persona 与 hot 都在时，只把 hot 当作往事（perso
 
 test("常驻层③：只剩 persona 时不出相关记忆、主动召回 silence、人设段仍在", () => {
   const now = Date.now();
-  const config = resolveConfig({ dataDir: "/tmp/x", mode: "companion" });
+  const config = resolveConfig({ dataDir: DATA_DIR, mode: "companion" });
   const records = [tierFixture(now)[0]];
   const index = createRetrievalIndex({ config });
   index.load(records);
@@ -2323,7 +2326,7 @@ test("常驻层③：只剩 persona 时不出相关记忆、主动召回 silence
 
 test("常驻层④：只剩 state 时同样 silence", () => {
   const now = Date.now();
-  const config = resolveConfig({ dataDir: "/tmp/x", mode: "companion" });
+  const config = resolveConfig({ dataDir: DATA_DIR, mode: "companion" });
   const records = [createRecord({ kind: "profile", tier: "state", subject: "self", text: "现在是深夜，她说累了", weight: 0.9, createdAt: now, updatedAt: now }, { now })];
   const index = createRetrievalIndex({ config });
   index.load(records);
@@ -2334,7 +2337,7 @@ test("常驻层④：只剩 state 时同样 silence", () => {
 
 test("常驻层⑤：调用方直传 ranked 时也挡住常驻层（top 不能是设定）", () => {
   const now = Date.now();
-  const config = resolveConfig({ dataDir: "/tmp/x", mode: "companion" });
+  const config = resolveConfig({ dataDir: DATA_DIR, mode: "companion" });
   const records = tierFixture(now);
   const ranked = [
     { record: records[0], score: 0.99, parts: {}, partsNorm: {} },

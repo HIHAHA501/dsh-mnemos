@@ -1,5 +1,11 @@
 # 更新记录
 
+## 未发布
+
+- README 状态表自相矛盾修正：Windows 一栏拆成「测试」与「桌面实装」两行，三档清单不再把 Windows 同时写成已验证与未验证
+- 测试不再硬编码 POSIX 临时目录：`"/tmp/x"` 在 Windows 上会被解释成当前盘根的 `C:\tmp\x`，37 处一律改成 `join(tmpdir(), …)`；新增 `test/meta/no-posix-tmp.test.mjs` 守卫
+- README 补「在真实宿主里验一遍（独立 profile）」：临时 `DSH_HOME` + `dsh plugin add file:`，验到面板三个页签出图为止（Windows 11 / 宿主 0.2.1-rc.5 / Node 24.21 实跑过）
+
 ## v0.1.2 — 只改测试门槛，运行时与 v0.1.1 等价
 
 - `test/retrieval/perf.test.mjs` 的 4 个绝对耗时门槛默认放宽 10 倍；严格基准用 `MNEMOS_PERF_STRICT=1 node --test`

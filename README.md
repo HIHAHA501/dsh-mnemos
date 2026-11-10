@@ -7,21 +7,22 @@ DSH 的本地长期记忆插件：把对话里值得留下的东西写成记录�
 
 | 部分 | 状态 | 依据 |
 | --- | --- | --- |
-| 全部 354 个测试 | ✅ 全绿 | `node --test`（零运行时依赖，不需要 install） |
-| 宿主进程内加载 | ✅ 已验证（本机 `desktop` profile 长期挂着跑） | `/.dsh-mnemos/panel` 返回 200 |
-| 浏览器内渲染 | ✅ 已验证（设置页「记忆星图」的真实 UI） | 概览 / 星图 / 说明三个页签 |
+| 全部 355 个测试 | ✅ 全绿 | `node --test`（零运行时依赖，不需要 install） |
+| 宿主进程内加载 | ✅ 已验证（本机 `desktop` profile 长期挂着跑；另有一次独立临时 profile 的复核） | `/.dsh-mnemos/panel` 返回 200 |
+| 浏览器内渲染 | ✅ 已验证（设置页「记忆星图」的真实 UI） | 概览 / 星图 / 说明三个页签；复核步骤见「在真实宿主里验一遍」 |
 | 人格同步（persona） | ✅ 已验证（对接 dsh-persona-dafeiyu，含相对路径解析与节流） | `/api/dsh-persona-dafeiyu/status` → 快照写入并原地更新 |
 | 情绪分量（强度 + 共振） | ✅ 已验证（没有 mood 时整份退出归一，老分值逐位不变） | 321 条老测试未改而全绿 |
 | 记忆星图 | ✅ 已验证（三维球壳 + 投影 + 预渲染贴图 + 未点亮空位） | 抽出绘制函数单独渲染截图核对 |
 | 向量通道（local / api） | ❌ **从未跑通过真实请求** | 全仓库没有代码设置 `globalThis.__dshMnemosOnnx`，只有 `vector.mjs` 在读 |
-| Windows 上的行为 | ✅ **已验证**（CI `node24-windows-latest` 全绿） | 这一关抓到真 bug：Windows 上 `rename` 覆盖被占用的目标会抛 EPERM，已加退避 + 原地覆盖兜底 |
+| Windows 上的测试 | ✅ **已验证**（CI `node24-windows-latest` 全绿；本机 Windows 11 + Node 24.21 跑过 355/355） | 这一关抓到真 bug：Windows 上 `rename` 覆盖被占用的目标会抛 EPERM，已加退避 + 原地覆盖兜底 |
+| Windows 上的桌面实装 | ✅ **已验证**（v0.1.2 + 宿主 0.2.1-rc.5，独立临时 profile，三个页签都出图） | 见「在真实宿主里验一遍（独立 profile）」 |
 | Node 22 | ✅ **已验证**（CI `node22-ubuntu` 全绿） | 曾经红过：一个 persona 超时用例赌了 `AbortSignal.timeout` 的 unref 定时器；改成注入 `AbortController` 后两个版本都绿 |
 
 ### 验证状态分成三档（不美化）
 
-- **真实环境验证过的**：宿主内加载、面板路由、浏览器内渲染、人格同步、星图绘制管线。
+- **真实环境验证过的**：宿主内加载、面板路由、浏览器内渲染、人格同步、星图绘制管线；Windows 上的测试与桌面实装。
 - **仅单测验证的**：核心层、检索层、宿主接线层的逻辑与降级路径，以及浏览器半边的纯函数。
-- **仍然没验证的**：向量通道的真实推理（local 与 api 都没发过一次请求）；Windows 上的行为。
+- **仍然没验证的**：向量通道的真实推理（local 与 api 都没发过一次请求）。
 
 ## 安装
 
@@ -572,6 +573,49 @@ apply: {"registered":true,"id":"dsh-mnemos"} label: 记忆星图
 同样的断言已经固化进仓库：`test/client/panel.test.mjs`（25 例，`node --test 'test/client/*.test.mjs'`），
 覆盖导出形状、`settings.section` 注册、五块渲染与全部降级路径；面板与宿主一旦漂移，这些用例会直接红。
 上面这段是它的最小骨架。
+
+### 在真实宿主里验一遍（独立 profile，不碰你自己的）
+
+上面那段跑的是 `client.js` 的纯函数：能证明面板的渲染逻辑，证明不了「装进真宿主、面板真的出图」。
+下面这套是 2026-11 在一台 Windows 11 上实际走通的顺序（宿主 `0.2.1-rc.5`、随宿主的 Node `24.21`），
+全程在一个临时 `DSH_HOME` 里做：不碰你已有的 profile，也不碰你的记忆目录。
+
+```bash
+# 临时 DSH_HOME：不要用你的 ~/.dsh。Windows 要给 Windows 绝对路径（本次实跑的形状），
+# macOS / Linux 用：export DSH_HOME="$(mktemp -d)/dsh-home"
+export DSH_HOME="C:/Users/<你>/AppData/Local/Temp/mnemos-verify/home"
+dsh --profile web --dump-config > /dev/null      # 首次会从模板生成 profiles/web
+dsh plugin --profile web add "file:<仓库绝对路径>" # 例：file:C:/code/dsh-mnemos（POSIX：file:/home/<你>/dsh-mnemos）
+dsh --profile web --no-open --port 58431         # 前台起宿主；它会打印一条带 token 的地址
+```
+
+另开一个终端，先验路由再验图：
+
+```bash
+curl -s http://127.0.0.1:58431/.dsh-mnemos/panel             # 200 + {stats,budget,vector,recalls,capture}
+curl -s -X POST -H 'content-type: application/json' \
+  -H 'x-dsh-mnemos: 1' -d '{"action":"search","query":"海边"}' \
+  http://127.0.0.1:58431/.dsh-mnemos/panel                    # 200 + {ok:true,rows:[...]}
+```
+
+同一条路由的三道槛也在这里验，一次三条命令就够：缺 `x-dsh-mnemos` 头 → 400，`DELETE` → 405，
+非本机来源 → 403（这一条要用同网段另一台机器或隧道地址访问才看得到）。
+
+然后在浏览器里打开那条带 token 的地址 → 左下「账号菜单」→「设置」，左侧多出一项 **记忆星图**，
+三个页签都得有东西：
+
+| 页签 | 空库（刚装好） | 有记录时 |
+| --- | --- | --- |
+| 概览 | 星幕里 5 颗暗星 + 「还没有星点——等第一批记忆落下，这里会亮起来。」 | 「记忆星座 · N 颗落在 K 个分层里」+ 总数环 + 四层条 |
+| 星图 | 空态说明（没有星点） | 三维球壳里的星点，一条记忆一颗星，点开看正文 |
+| 说明 | 每一块讲什么、怎么算 | 同左 |
+
+实装复核时盯的三件事（都可复现）：设置侧栏出现「记忆星图」；`/.dsh-mnemos/panel` 两次 200
+（概览与星图各拉一次）；整个会话 `console` 里 error 0 条（含星图那次 canvas 绘制）。
+往里写 8 条记录后概览读作「记忆星座 · 8 颗落在 4 个分层里」，热 3 / 冷 3 / 人格 1 / 状态 1，
+与 `stats.byTier` 逐项一致——这些数字是从 `GET /.dsh-mnemos/panel` 来的，不是前端写死的。
+
+收摊：`rm -rf "$DSH_HOME"`（临时 home 整个删掉；你的 profile 与记忆目录一个字节都没动）。
 
 ### 在面板里能做什么（不用敲命令）
 
